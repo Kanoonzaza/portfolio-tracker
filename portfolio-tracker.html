@@ -14,9 +14,16 @@
     // Register the service worker only when served via http(s) — file:// can't host one.
     if('serviceWorker' in navigator && location.protocol.startsWith('http')){
       window.addEventListener('load', ()=>{
-        navigator.serviceWorker.register('service-worker.js')
-          .then(reg=>console.log('[PWA] Service worker registered, scope:', reg.scope))
-          .catch(err=>console.warn('[PWA] SW registration failed:', err.message));
+        navigator.serviceWorker.register('service-worker.js').then(reg=>{
+          console.log('[PWA] Service worker registered, scope:', reg.scope);
+          // Force-check for a new SW version on every page load (bypasses browser cache on SW file)
+          reg.update();
+          // When the new SW takes control, reload once to get fresh HTML/assets automatically
+          let reloading=false;
+          navigator.serviceWorker.addEventListener('controllerchange', ()=>{
+            if(!reloading){ reloading=true; window.location.reload(); }
+          });
+        }).catch(err=>console.warn('[PWA] SW registration failed:', err.message));
       });
     }
   </script>
@@ -278,7 +285,7 @@ const { useState, useEffect, useRef, useCallback, useMemo } = React;
 /* ─── constants ─── */
 // VERSION marker — if you don't see this log in the console, the browser
 // is running cached old code. Build timestamp updated on each edit.
-const APP_VERSION='v7.9.1-auth-fix-2026-05-24';
+const APP_VERSION='v7.9.2-sw-autoupdate-2026-05-24';
 console.log('%c🚀 Portfolio Tracker '+APP_VERSION,'background:#3b82f6;color:white;padding:4px 10px;border-radius:4px;font-weight:bold;font-size:14px');
 console.log('%cOrigin: '+location.origin+(location.protocol==='file:'?' ⚠️ (use start-portfolio-tracker.bat to run via localhost)':' ✓'),'color:'+(location.protocol==='file:'?'#ef4444':'#22c55e')+';font-weight:bold');
 const STORE='ptv3', STORE_OLD='ptv2';
