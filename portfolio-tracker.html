@@ -34,11 +34,12 @@
     const auth=getAuth(app);
     const db=getFirestore(app);
     const prov=new GoogleAuthProvider();
-    const isMobile=()=>/Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent)||window.matchMedia('(pointer:coarse)').matches;
-    // Consume any pending redirect result on page load (returned from signInWithRedirect)
-    getRedirectResult(auth).catch(err=>console.warn('[Auth] redirect result error:',err.message));
+    const isIOS=()=>/iPhone|iPad|iPod/i.test(navigator.userAgent);
     window._fb={
-      signIn:()=>isMobile()?signInWithRedirect(auth,prov):signInWithPopup(auth,prov),
+      // iOS needs redirect (popups blocked); Android/desktop use popup (more reliable)
+      signIn:()=>isIOS()?signInWithRedirect(auth,prov):signInWithPopup(auth,prov).catch(err=>{if(err.code==='auth/popup-blocked'||err.code==='auth/popup-closed-by-user')return signInWithRedirect(auth,prov);throw err;}),
+      // Called once on app load to consume any pending redirect result
+      consumeRedirect:()=>getRedirectResult(auth),
       signOut:()=>signOut(auth),
       save:(uid,data)=>setDoc(doc(db,'portfolios',uid),{data:JSON.stringify(data),updatedAt:Date.now()}),
       listen:(uid,onData,onEmpty)=>onSnapshot(doc(db,'portfolios',uid),snap=>{if(snap.exists())onData(JSON.parse(snap.data().data));else if(onEmpty)onEmpty();}),
@@ -277,7 +278,7 @@ const { useState, useEffect, useRef, useCallback, useMemo } = React;
 /* ─── constants ─── */
 // VERSION marker — if you don't see this log in the console, the browser
 // is running cached old code. Build timestamp updated on each edit.
-const APP_VERSION='v7.9-mobile-ux-2026-05-24';
+const APP_VERSION='v7.9.1-auth-fix-2026-05-24';
 console.log('%c🚀 Portfolio Tracker '+APP_VERSION,'background:#3b82f6;color:white;padding:4px 10px;border-radius:4px;font-weight:bold;font-size:14px');
 console.log('%cOrigin: '+location.origin+(location.protocol==='file:'?' ⚠️ (use start-portfolio-tracker.bat to run via localhost)':' ✓'),'color:'+(location.protocol==='file:'?'#ef4444':'#22c55e')+';font-weight:bold');
 const STORE='ptv3', STORE_OLD='ptv2';
@@ -4795,8 +4796,17 @@ function App(){
         }
       });
     };
-    if(window._fb) setup();
-    else window.addEventListener('firebase-ready',setup,{once:true});
+    const run=()=>{
+      setup();
+      // Consume any pending redirect sign-in result (from signInWithRedirect on iOS)
+      window._fb.consumeRedirect().then(result=>{
+        if(result?.user) toast(`Welcome, ${result.user.displayName||result.user.email}!`,'ok');
+      }).catch(err=>{
+        if(err.code!=='auth/no-auth-event') toast(err.message||'Sign-in failed','err');
+      });
+    };
+    if(window._fb) run();
+    else window.addEventListener('firebase-ready',run,{once:true});
     return()=>{if(unsubRef.current)unsubRef.current();};
   },[]);
 
