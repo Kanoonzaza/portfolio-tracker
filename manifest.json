@@ -11,13 +11,13 @@
   "categories": ["finance", "productivity"],
   "icons": [
     {
-      "src": "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 192 192'><rect width='192' height='192' rx='32' fill='%230f172a'/><text x='96' y='130' font-size='110' text-anchor='middle' fill='%233b82f6'>📊</text></svg>",
+      "src": "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 192 192'><rect width='192' height='192' rx='32' fill='%230f172a'/><rect x='39' y='110' width='30' height='48' rx='4' fill='%233b82f6'/><rect x='81' y='80' width='30' height='78' rx='4' fill='%233b82f6'/><rect x='123' y='50' width='30' height='108' rx='4' fill='%233b82f6'/><path d='M 30 134 L 54 110 L 96 80 L 138 50 L 168 30' stroke='%2322c55e' stroke-width='6' fill='none' stroke-linecap='round' stroke-linejoin='round'/><circle cx='168' cy='30' r='6' fill='%2322c55e'/></svg>",
       "sizes": "192x192",
       "type": "image/svg+xml",
       "purpose": "any maskable"
     },
     {
-      "src": "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'><rect width='512' height='512' rx='80' fill='%230f172a'/><text x='256' y='350' font-size='300' text-anchor='middle' fill='%233b82f6'>📊</text></svg>",
+      "src": "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'><rect width='512' height='512' rx='85' fill='%230f172a'/><rect x='104' y='294' width='80' height='128' rx='11' fill='%233b82f6'/><rect x='216' y='214' width='80' height='208' rx='11' fill='%233b82f6'/><rect x='328' y='134' width='80' height='288' rx='11' fill='%233b82f6'/><path d='M 80 358 L 144 294 L 256 214 L 368 134 L 448 80' stroke='%2322c55e' stroke-width='16' fill='none' stroke-linecap='round' stroke-linejoin='round'/><circle cx='448' cy='80' r='16' fill='%2322c55e'/></svg>",
       "sizes": "512x512",
       "type": "image/svg+xml",
       "purpose": "any maskable"

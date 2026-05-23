@@ -9,7 +9,7 @@
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="apple-mobile-web-app-title" content="Portfolio">
-  <link rel="apple-touch-icon" href="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 192 192'><rect width='192' height='192' rx='32' fill='%230f172a'/><text x='96' y='130' font-size='110' text-anchor='middle' fill='%233b82f6'>📊</text></svg>">
+  <link rel="apple-touch-icon" href="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 192 192'><rect width='192' height='192' rx='32' fill='%230f172a'/><rect x='39' y='110' width='30' height='48' rx='4' fill='%233b82f6'/><rect x='81' y='80' width='30' height='78' rx='4' fill='%233b82f6'/><rect x='123' y='50' width='30' height='108' rx='4' fill='%233b82f6'/><path d='M 30 134 L 54 110 L 96 80 L 138 50 L 168 30' stroke='%2322c55e' stroke-width='6' fill='none' stroke-linecap='round' stroke-linejoin='round'/><circle cx='168' cy='30' r='6' fill='%2322c55e'/></svg>">
   <script>
     // Register the service worker only when served via http(s) — file:// can't host one.
     if('serviceWorker' in navigator && location.protocol.startsWith('http')){
@@ -27,15 +27,18 @@
 
   <script type="module">
     import{initializeApp}from"https://www.gstatic.com/firebasejs/12.13.0/firebase-app.js";
-    import{getAuth,GoogleAuthProvider,signInWithPopup,signOut,onAuthStateChanged}from"https://www.gstatic.com/firebasejs/12.13.0/firebase-auth.js";
+    import{getAuth,GoogleAuthProvider,signInWithPopup,signInWithRedirect,getRedirectResult,signOut,onAuthStateChanged}from"https://www.gstatic.com/firebasejs/12.13.0/firebase-auth.js";
     import{getFirestore,doc,setDoc,onSnapshot}from"https://www.gstatic.com/firebasejs/12.13.0/firebase-firestore.js";
     const cfg={apiKey:"AIzaSyDo76vginvQIR72jDeMeZsarmvO5wN4JqY",authDomain:"go-wild-6f563.firebaseapp.com",projectId:"go-wild-6f563",storageBucket:"go-wild-6f563.firebasestorage.app",messagingSenderId:"176871857948",appId:"1:176871857948:web:7ef4dac2640eb9891ea4d9"};
     const app=initializeApp(cfg);
     const auth=getAuth(app);
     const db=getFirestore(app);
     const prov=new GoogleAuthProvider();
+    const isMobile=()=>/Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent)||window.matchMedia('(pointer:coarse)').matches;
+    // Consume any pending redirect result on page load (returned from signInWithRedirect)
+    getRedirectResult(auth).catch(err=>console.warn('[Auth] redirect result error:',err.message));
     window._fb={
-      signIn:()=>signInWithPopup(auth,prov),
+      signIn:()=>isMobile()?signInWithRedirect(auth,prov):signInWithPopup(auth,prov),
       signOut:()=>signOut(auth),
       save:(uid,data)=>setDoc(doc(db,'portfolios',uid),{data:JSON.stringify(data),updatedAt:Date.now()}),
       listen:(uid,onData,onEmpty)=>onSnapshot(doc(db,'portfolios',uid),snap=>{if(snap.exists())onData(JSON.parse(snap.data().data));else if(onEmpty)onEmpty();}),
@@ -52,7 +55,8 @@
       --blue:#3b82f6; --blue2:#2563eb; --green:#22c55e; --red:#ef4444; --amber:#f59e0b; --purple:#8b5cf6;
       --r:12px; --rs:8px;
     }
-    body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif; background:var(--bg); color:var(--text); min-height:100vh; display:flex; }
+    html, body { overflow-x: hidden; overscroll-behavior-x: none; max-width: 100vw; }
+    body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif; background:var(--bg); color:var(--text); min-height:100vh; display:flex; touch-action: pan-y; }
 
     /* Sidebar */
     .sidebar { width:220px; min-height:100vh; background:var(--bg2); border-right:1px solid var(--border); display:flex; flex-direction:column; position:fixed; top:0; left:0; bottom:0; z-index:100; overflow-y:auto; }
@@ -222,8 +226,10 @@
       .sc{padding:12px 14px;}
       .sv{font-size:20px;}
     }
-    /* Phone: convert sidebar into a bottom bar with horizontal icon row */
-    @media(max-width:540px) {
+    /* Portrait phones AND portrait tablets: convert sidebar into a bottom bar.
+       Landscape on any device keeps the slim side rail (from the 720px block above)
+       so vertical space is preserved when the screen is short. */
+    @media (orientation: portrait) and (max-width: 900px) {
       /* iPhone safe areas: bottom-nav must clear the home indicator,
          and the top of .main must clear the notch / Dynamic Island
          when launched as a standalone PWA. */
@@ -231,17 +237,21 @@
       .sidebar{
         width:auto;left:0;right:0;top:auto;bottom:0;
         height:calc(56px + env(safe-area-inset-bottom, 0px));
+        min-height:unset;
         padding-bottom:env(safe-area-inset-bottom, 0px);
         flex-direction:row;overflow-x:auto;border-right:none;border-top:1px solid var(--border);
         background:var(--bg2);z-index:100;padding-left:0;padding-right:0;padding-top:0;
       }
       .logo{display:none;}
-      .nav-btn{flex:0 0 auto;flex-direction:column;gap:2px;padding:6px 14px;font-size:9px;text-align:center;border-radius:0;}
+      .port-sw{display:none;}
+      .nav-btn{flex:1;flex-direction:column;gap:2px;padding:6px 4px;font-size:9px;text-align:center;border-radius:0;}
       .nav-btn.active{border-bottom:2px solid var(--blue);background:rgba(59,130,246,.08);}
       .nav-btn .ni{font-size:18px;}
       .nav-btn span:last-child{display:inline!important;font-size:9px;}
       .main{
         margin-left:0;
+        width:100%;
+        max-width:100vw;
         padding:calc(12px + env(safe-area-inset-top, 0px)) calc(12px + env(safe-area-inset-right, 0px)) 14px calc(12px + env(safe-area-inset-left, 0px));
       }
       .sidebar > div:last-child{display:none;}     /* user-account block */
@@ -267,7 +277,7 @@ const { useState, useEffect, useRef, useCallback, useMemo } = React;
 /* ─── constants ─── */
 // VERSION marker — if you don't see this log in the console, the browser
 // is running cached old code. Build timestamp updated on each edit.
-const APP_VERSION='v7.8-mobile-pwa-2026-05-23';
+const APP_VERSION='v7.9-mobile-ux-2026-05-24';
 console.log('%c🚀 Portfolio Tracker '+APP_VERSION,'background:#3b82f6;color:white;padding:4px 10px;border-radius:4px;font-weight:bold;font-size:14px');
 console.log('%cOrigin: '+location.origin+(location.protocol==='file:'?' ⚠️ (use start-portfolio-tracker.bat to run via localhost)':' ✓'),'color:'+(location.protocol==='file:'?'#ef4444':'#22c55e')+';font-weight:bold');
 const STORE='ptv3', STORE_OLD='ptv2';
@@ -2087,7 +2097,7 @@ function ImportModal({onClose, onImport, existingHoldings=[]}){
 
   return(
     <Modal title="📷 Import from Photos"onClose={onClose}maxWidth={680}>
-      <input ref={fileRef}type="file"accept="image/*"multiple capture="environment" style={{display:'none'}}
+      <input ref={fileRef}type="file"accept="image/*"multiple style={{display:'none'}}
         onChange={e=>{const fs=e.target.files; handleFiles(fs, phase==='review' && rows.some(r=>r.sym)); e.target.value='';}}/>
 
       {phase==='idle'&&(
@@ -2366,7 +2376,7 @@ function ExpandedRow({h,prices,onAddTrade,onAddDividend,onDeleteTrade,onDeleteDi
         <button className="btn btn-ghost btn-sm"onClick={onAddTrade}>+ Add Trade</button>
         <button className="btn btn-ghost btn-sm"onClick={onAddDividend}>+ Log Dividend</button>
         <button className="btn btn-ghost btn-sm"onClick={()=>photoRef.current.click()}>{uploading?'Uploading…':'📷 '+(h.photo?'Change Photo':'Attach Photo')}</button>
-        <input ref={photoRef} type="file" accept="image/*" capture="environment" style={{display:'none'}} onChange={pickPhoto}/>
+        <input ref={photoRef} type="file" accept="image/*" style={{display:'none'}} onChange={pickPhoto}/>
         <button className="btn btn-ghost btn-sm"style={{marginLeft:'auto',color:'var(--red)'}}onClick={async()=>{ if(await uiConfirm(`Remove ${h.symbol} and all its trades?`,{danger:true,okLabel:'Remove'})) onDelete(h.id); }}>🗑 Remove Holding</button>
       </div>
       {/* Tag editor — small chips with add/remove */}
@@ -4972,7 +4982,7 @@ function App(){
               </div>
             </div>
           ) : (
-            <button className="btn btn-ghost" style={{width:'100%',justifyContent:'center',fontSize:12}} onClick={()=>window._fb?.signIn().catch(()=>{})}>☁ Sign in to sync</button>
+            <button className="btn btn-ghost" style={{width:'100%',justifyContent:'center',fontSize:12}} onClick={()=>window._fb?.signIn().catch(err=>toast(err.message||'Sign-in failed','err'))}>☁ Sign in to sync</button>
           )}
         </div>
       </nav>
