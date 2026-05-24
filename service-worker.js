@@ -9,7 +9,7 @@
  *
  * On version bump, the old cache is purged in 'activate'.
  */
-const VERSION='ptv3-sw-2026-05-24-news-feed';
+const VERSION='ptv3-sw-2026-05-24-alerts';
 const SHELL_CACHE='shell-'+VERSION;
 const SHELL_URLS=[
   './portfolio-tracker.html',
@@ -30,6 +30,22 @@ self.addEventListener('activate', event=>{
       keys.filter(k=>k!==SHELL_CACHE).map(k=>caches.delete(k))
     )).then(()=>self.clients.claim())
   );
+});
+
+// Bring the app to the foreground when the user clicks a price-alert /
+// EMA-cross notification. Focuses an existing tab if one is open, else
+// opens a fresh one at the app shell.
+self.addEventListener('notificationclick', event=>{
+  event.notification.close();
+  event.waitUntil((async()=>{
+    const all=await self.clients.matchAll({type:'window', includeUncontrolled:true});
+    for(const c of all){
+      if('focus' in c) return c.focus();
+    }
+    if(self.clients.openWindow){
+      return self.clients.openWindow('./portfolio-tracker.html');
+    }
+  })());
 });
 
 self.addEventListener('fetch', event=>{

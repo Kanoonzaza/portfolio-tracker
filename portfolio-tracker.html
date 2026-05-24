@@ -3317,12 +3317,13 @@ function AllocationDonuts({rows, totalVal}){
 }
 
 /* ─── Holdings page ─── */
-function HoldingsPage({portfolio,prices,loading,onAdd,onImportBulk,onAddTrade,onAddDividend,onDeleteTrade,onDeleteDividend,onDeleteHolding,onRefresh,onSetPhoto,onSetTags,onSetTarget}){
+function HoldingsPage({portfolio,prices,loading,onAdd,onImportBulk,onAddTrade,onAddDividend,onDeleteTrade,onDeleteDividend,onDeleteHolding,onRefresh,onSetPhoto,onSetTags,onSetTarget,onUpdateHolding}){
   const[showAdd,setShowAdd]=useState(false);
   const[showImport,setShowImport]=useState(false);
   const[showCsvImport,setShowCsvImport]=useState(false);
   const[tradeFor,setTradeFor]=useState(null);
   const[divFor,setDivFor]=useState(null);
+  const[chartFor,setChartFor]=useState(null);
   const[expanded,setExpanded]=useState(null);
   const[sort,setSort]=useState('val-desc');
   const[search,setSearch]=useState('');
@@ -3472,7 +3473,7 @@ function HoldingsPage({portfolio,prices,loading,onAdd,onImportBulk,onAddTrade,on
                 {sorted.map(h=>(
                   <React.Fragment key={h.id}>
                     <tr className="data-row"onClick={()=>setExpanded(e=>e===h.id?null:h.id)}>
-                      <td><div className="sym-cell"><div className="sym-badge"style={{background:h.color+'22',color:h.color}}>{h.symbol.replace('-USD','').slice(0,3)}</div><div><div className="sym-name">{h.symbol}</div><span className={`tag tag-${h.type}`}>{h.type}</span></div></div></td>
+                      <td><div className="sym-cell"><div className="sym-badge"style={{background:h.color+'22',color:h.color}}>{h.symbol.replace('-USD','').slice(0,3)}</div><div><div className="sym-name">{h.symbol} {((h.alerts||[]).some(a=>a.enabled!==false && !a.triggered) || (h.emaTriggers&&Object.values(h.emaTriggers).some(Boolean))) && <span title="Alerts armed" style={{fontSize:10,marginLeft:4}}>🔔</span>}</div><span className={`tag tag-${h.type}`}>{h.type}</span></div><button title="Chart & alerts"onClick={e=>{e.stopPropagation();setChartFor(h);}}style={{marginLeft:'auto',background:'transparent',border:'1px solid var(--border)',borderRadius:6,padding:'4px 8px',color:'var(--muted)',cursor:'pointer',fontSize:14}}>📈</button></div></td>
                       <td>{fmt(h.shares,h.type==='crypto'?6:4)}</td>
                       <td>{fmtC(h.avgCost)}</td>
                       <td>{h.hasPriceData?<span style={{display:'flex',alignItems:'center',gap:5}}><span className="dot-live"/>{fmtC(prices[h.symbol]?.price)}</span>:loading?<span className="spin spin-sm"/>:<span className="neu">—</span>}</td>
@@ -3534,6 +3535,13 @@ function HoldingsPage({portfolio,prices,loading,onAdd,onImportBulk,onAddTrade,on
       {showCsvImport&&<CsvImportModal existingHoldings={portfolio.holdings}onClose={()=>setShowCsvImport(false)}onImport={hs=>{onImportBulk(hs);setShowCsvImport(false);}}/>}
       {tradeFor&&<AddTradeModal holding={tradeFor}onClose={()=>setTradeFor(null)}onAdd={t=>{onAddTrade(tradeFor.id,t);setTradeFor(null);}}/>}
       {divFor&&<AddDividendModal holding={divFor}currentShares={computeHolding(divFor,prices[divFor.symbol]).shares}onClose={()=>setDivFor(null)}onAdd={d=>{onAddDividend(divFor.id,d);setDivFor(null);}}/>}
+      {chartFor&&(()=>{
+        // Pull the freshest holding from the portfolio prop so edits made
+        // inside the modal (add/toggle/delete alerts) propagate back through
+        // upstream state before the next render.
+        const fresh=portfolio.holdings.find(x=>x.id===chartFor.id)||chartFor;
+        return <StockChartModal holding={fresh} livePrice={prices[fresh.symbol]} onClose={()=>setChartFor(null)} onUpdateHolding={onUpdateHolding}/>;
+      })()}
     </div>
   );
 }
@@ -4076,6 +4084,139 @@ async function fetchBenchmarkHistory(sym='SPY'){
   }
 }
 
+// ─── Per-symbol historical price cache (for stock chart modal + EMA) ───
+//   Cache keyed by `${symbol}|${range}` with 24h TTL (daily-close data
+//   doesn't change intraday). Used by StockChartModal and the EMA
+//   trigger evaluator.
+const HIST_CACHE_KEY='ptv3-hist-cache';
+const HIST_MAX_AGE_MS=24*60*60*1000;
+function loadHistCache(){
+  try{ return JSON.parse(localStorage.getItem(HIST_CACHE_KEY)||'{}'); }catch{ return{}; }
+}
+function saveHistCache(c){
+  try{ localStorage.setItem(HIST_CACHE_KEY, JSON.stringify(c)); }catch{}
+}
+// Fetch daily closes for a symbol over a given range via the Yahoo chart
+// endpoint (same source as fetchBenchmarkHistory). Range strings match Yahoo:
+// 1mo / 3mo / 6mo / 1y / 5y. Returns {closes:[...], dates:[...]} or null on failure.
+async function fetchHistoricalPrices(symbol, range='1y', opts={}){
+  const force=opts.force===true;
+  const key=`${symbol}|${range}`;
+  const cache=loadHistCache();
+  if(!force && cache[key]?.closes?.length && (Date.now()-cache[key].fetchedAt < HIST_MAX_AGE_MS)){
+    return{closes:cache[key].closes, dates:cache[key].dates};
+  }
+  const url=`https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?interval=1d&range=${range}`;
+  const proxied=proxyWrap(url)||url;
+  try{
+    const ctrl=new AbortController();
+    const timer=setTimeout(()=>ctrl.abort(), 9000);
+    const r=await fetch(proxied,{cache:'no-store',signal:ctrl.signal});
+    clearTimeout(timer);
+    if(!r.ok) return cache[key] ? {closes:cache[key].closes, dates:cache[key].dates} : null;
+    const j=await r.json();
+    const result=j?.chart?.result?.[0];
+    if(!result) return null;
+    const ts=result.timestamp||[];
+    const rawCloses=result.indicators?.quote?.[0]?.close||[];
+    const closes=[], dates=[];
+    for(let i=0;i<ts.length;i++){
+      if(rawCloses[i]==null) continue;
+      closes.push(Number(rawCloses[i]));
+      dates.push(new Date(ts[i]*1000).toISOString().slice(0,10));
+    }
+    if(!closes.length) return null;
+    cache[key]={closes, dates, fetchedAt:Date.now()};
+    saveHistCache(cache);
+    return{closes, dates};
+  }catch(e){
+    console.warn('[Hist] Fetch failed for',symbol,range,e.message);
+    return cache[key] ? {closes:cache[key].closes, dates:cache[key].dates} : null;
+  }
+}
+
+// Standard EMA: seed with SMA of first `period` closes, then
+//   EMA_t = close_t * k + EMA_{t-1} * (1-k),  k = 2/(period+1)
+// Returns an array aligned with `closes` (null for the warm-up window).
+function calculateEMA(closes, period){
+  if(!Array.isArray(closes) || closes.length<period) return new Array(closes?.length||0).fill(null);
+  const k=2/(period+1);
+  const out=new Array(closes.length).fill(null);
+  let sum=0;
+  for(let i=0;i<period;i++) sum+=closes[i];
+  let ema=sum/period;
+  out[period-1]=ema;
+  for(let i=period;i<closes.length;i++){
+    ema=closes[i]*k + ema*(1-k);
+    out[i]=ema;
+  }
+  return out;
+}
+
+// Detect whether series A crossed series B between `prev` and `curr` samples.
+// Returns 'up' (A moved from <=B to >B), 'down' (A moved from >=B to <B), or null.
+// Any null input short-circuits to null (warm-up window — no cross yet).
+function detectCross(prevA, currA, prevB, currB){
+  if(prevA==null||currA==null||prevB==null||currB==null) return null;
+  if(prevA<=prevB && currA>currB) return 'up';
+  if(prevA>=prevB && currA<currB) return 'down';
+  return null;
+}
+
+// ─── Browser notifications ───────────────────────────────────────────
+//   Central dispatcher. Always emits an in-app toast via the global toast
+//   bridge (wired by App on mount). If Notification permission is granted,
+//   ALSO fires a system notification. Per-tag dedupe prevents repeat fires
+//   within NOTIFY_DEDUPE_MS for the same tag.
+const NOTIFY_DEDUPE_MS=12*60*60*1000; // 12h
+const _notifySeen={}; // tag -> last fire ms
+let _toastBridge=null;
+function _setToastBridge(fn){ _toastBridge=fn; }
+function notify(title, body, tag){
+  const now=Date.now();
+  if(tag && _notifySeen[tag] && (now-_notifySeen[tag] < NOTIFY_DEDUPE_MS)) return false;
+  if(tag) _notifySeen[tag]=now;
+  // In-app toast (always)
+  try{ _toastBridge?.(`${title}: ${body}`, 'info'); }catch{}
+  // System notification (if granted)
+  try{
+    if(typeof Notification!=='undefined' && Notification.permission==='granted'){
+      if('serviceWorker' in navigator && navigator.serviceWorker.ready){
+        navigator.serviceWorker.ready.then(reg=>{
+          reg.showNotification(title, {body, tag, icon:'./manifest.json', renotify:false}).catch(()=>{
+            try{ new Notification(title,{body, tag}); }catch{}
+          });
+        }).catch(()=>{
+          try{ new Notification(title,{body, tag}); }catch{}
+        });
+      } else {
+        new Notification(title,{body, tag});
+      }
+    }
+  }catch{}
+  return true;
+}
+function getNotificationPermission(){
+  if(typeof Notification==='undefined') return 'unsupported';
+  return Notification.permission; // 'granted' | 'denied' | 'default'
+}
+async function requestNotificationPermission(){
+  if(typeof Notification==='undefined') return 'unsupported';
+  if(Notification.permission==='granted'||Notification.permission==='denied') return Notification.permission;
+  try{ return await Notification.requestPermission(); }
+  catch{ return 'default'; }
+}
+
+// ─── EMA state cache (previous values for cross detection) ───
+//   For each symbol: {ema50, ema200, lastPrice, lastCheckedAt, lastClose, lastCloseDate}
+const EMA_STATE_KEY='ptv3-ema-state';
+function loadEmaState(){
+  try{ return JSON.parse(localStorage.getItem(EMA_STATE_KEY)||'{}'); }catch{ return{}; }
+}
+function saveEmaState(s){
+  try{ localStorage.setItem(EMA_STATE_KEY, JSON.stringify(s)); }catch{}
+}
+
 // ─── Sector cache: per-ticker industry sector from Yahoo Finance ───
 //   Cached indefinitely in localStorage (sectors rarely change for a given
 //   ticker). Refreshed on first encounter only.
@@ -4527,6 +4668,43 @@ function NewsPage({portfolio}){
 }
 
 /* ─── Settings page ─── */
+function NotificationsSettings(){
+  const[perm,setPerm]=useState(getNotificationPermission());
+  useEffect(()=>{
+    // Some browsers don't fire an event when permission changes — poll lightly
+    const t=setInterval(()=>setPerm(getNotificationPermission()),2000);
+    return()=>clearInterval(t);
+  },[]);
+  async function ask(){
+    const next=await requestNotificationPermission();
+    setPerm(next);
+    if(next==='granted'){
+      try{ notify('Notifications enabled','You’ll get alerts here when price targets and EMA crosses fire','perm-test'); }catch{}
+    }
+  }
+  const status=(()=>{
+    if(perm==='granted') return{label:'✓ Enabled', color:'var(--green)', sub:'Price alerts and EMA-cross triggers will show as system notifications.'};
+    if(perm==='denied')  return{label:'✕ Blocked', color:'var(--red)',   sub:'Reset the site permission in your browser to re-enable. Alerts still show as in-app toasts.'};
+    if(perm==='unsupported') return{label:'Unsupported', color:'var(--dim)', sub:'This browser doesn’t support the Notification API. Alerts will still show as in-app toasts.'};
+    return{label:'Not enabled', color:'var(--muted)', sub:'Without permission, alerts only show as in-app toasts (visible when the app is open).'};
+  })();
+  return(
+    <div className="card"style={{marginBottom:14}}>
+      <div style={{padding:'14px 20px',fontWeight:600,fontSize:14,borderBottom:'1px solid var(--border)'}}>🔔 Notifications</div>
+      <div className="set-row">
+        <div style={{flex:1}}>
+          <div className="set-title">Browser notifications · <span style={{color:status.color,fontWeight:700}}>{status.label}</span></div>
+          <div className="set-sub">{status.sub}</div>
+        </div>
+        {perm!=='granted'&&perm!=='denied'&&perm!=='unsupported'&&<button className="btn btn-primary btn-sm"onClick={ask}>Enable</button>}
+      </div>
+      <div style={{padding:'8px 20px 14px',fontSize:11,color:'var(--dim)',lineHeight:1.6}}>
+        Add alerts on individual stocks via the 📈 chart icon on each holding row. Each alert fires once when the live price crosses the target; reset it from the chart modal to re-arm.
+      </div>
+    </div>
+  );
+}
+
 function SettingsPage({data,onRenamePortfolio,onDeletePortfolio,onAddPortfolio,onClearAll,onSetCurrency,user,syncing}){
   const fRef=useRef();
   const[editingPort,setEditingPort]=useState(null);
@@ -4630,6 +4808,7 @@ function SettingsPage({data,onRenamePortfolio,onDeletePortfolio,onAddPortfolio,o
           ) : null;
         })()}
       </div>
+      <NotificationsSettings/>
       <div className="card"style={{marginBottom:14}}>
         <div style={{padding:'14px 20px',fontWeight:600,fontSize:14,borderBottom:'1px solid var(--border)'}}>Data</div>
         <div className="set-row"><div><div className="set-title">Export All Data</div><div className="set-sub">All portfolios as JSON</div></div><button className="btn btn-ghost"onClick={exportJSON}>⬇ Export</button></div>
@@ -4696,6 +4875,226 @@ function SettingsPage({data,onRenamePortfolio,onDeletePortfolio,onAddPortfolio,o
   );
 }
 
+/* ─── Stock Chart Modal ───────────────────────────────────────────────
+   Per-stock price chart with EMA 50 / EMA 200 overlays, price alerts
+   management, and EMA-trigger toggles. Opened from the chart icon on
+   each holdings row. */
+const CHART_TIMEFRAMES=[
+  {id:'1mo', label:'1M', showEma50:false, showEma200:false},
+  {id:'3mo', label:'3M', showEma50:true,  showEma200:false},
+  {id:'6mo', label:'6M', showEma50:true,  showEma200:false},
+  {id:'1y',  label:'1Y', showEma50:true,  showEma200:true},
+  {id:'5y',  label:'5Y', showEma50:true,  showEma200:true},
+];
+function StockChartModal({holding, livePrice, onClose, onUpdateHolding}){
+  const[range,setRange]=useState('1y');
+  const[hist,setHist]=useState(null); // {closes,dates}
+  const[fetching,setFetching]=useState(false);
+  const[err,setErr]=useState(null);
+  const canvasRef=useRef(null);
+  const chartRef=useRef(null);
+
+  // Local form state for adding a new alert
+  const[newAlertCondition,setNewAlertCondition]=useState('above');
+  const[newAlertPrice,setNewAlertPrice]=useState('');
+
+  const tfMeta=CHART_TIMEFRAMES.find(t=>t.id===range)||CHART_TIMEFRAMES[3];
+  const alerts=holding.alerts||[];
+  const emaTriggers=holding.emaTriggers||{priceCrossEma50:false,priceCrossEma200:false,goldenDeathCross:false};
+
+  // Fetch historical data when range changes
+  useEffect(()=>{
+    let cancelled=false;
+    setFetching(true);
+    setErr(null);
+    fetchHistoricalPrices(holding.symbol, range).then(data=>{
+      if(cancelled) return;
+      setFetching(false);
+      if(!data){ setErr('Could not fetch chart data'); setHist(null); return; }
+      setHist(data);
+    });
+    return()=>{cancelled=true;};
+  },[holding.symbol, range]);
+
+  // Render Chart.js line chart
+  useEffect(()=>{
+    if(!canvasRef.current) return;
+    chartRef.current?.destroy();
+    chartRef.current=null;
+    if(!hist || !hist.closes.length) return;
+    const ema50  = tfMeta.showEma50  ? calculateEMA(hist.closes, 50)  : null;
+    const ema200 = tfMeta.showEma200 ? calculateEMA(hist.closes, 200) : null;
+    const datasets=[{
+      label:'Price', data:hist.closes,
+      borderColor:'#3b82f6', backgroundColor:'rgba(59,130,246,.12)',
+      fill:true, tension:0.15, pointRadius:0, borderWidth:2,
+    }];
+    if(ema50){
+      datasets.push({
+        label:'EMA 50', data:ema50,
+        borderColor:'#f59e0b', borderWidth:1.5, borderDash:[],
+        pointRadius:0, fill:false, tension:0.15,
+      });
+    }
+    if(ema200){
+      datasets.push({
+        label:'EMA 200', data:ema200,
+        borderColor:'#ef4444', borderWidth:1.5, borderDash:[6,4],
+        pointRadius:0, fill:false, tension:0.15,
+      });
+    }
+    // Price-alert horizontal lines (constant array per dataset)
+    alerts.filter(a=>a.enabled!==false && a.price>0).forEach(a=>{
+      datasets.push({
+        label:`Alert ${a.condition} ${fmt(a.price)}`,
+        data:hist.closes.map(()=>a.price),
+        borderColor: a.condition==='above' ? '#22c55e' : '#ef4444',
+        borderWidth:1, borderDash:[2,3], pointRadius:0, fill:false,
+      });
+    });
+    chartRef.current=new Chart(canvasRef.current,{
+      type:'line',
+      data:{labels:hist.dates.map(d=>d.slice(5)), datasets},
+      options:{
+        responsive:true, maintainAspectRatio:false,
+        interaction:{mode:'index',intersect:false},
+        plugins:{
+          legend:{labels:{color:'#94a3b8',usePointStyle:true,pointStyleWidth:8,boxWidth:8,font:{size:11}}},
+          tooltip:{callbacks:{label:ctx=>` ${ctx.dataset.label}: ${ctx.raw==null?'—':'$'+Number(ctx.raw).toFixed(2)}`}},
+        },
+        scales:{
+          x:{ticks:{color:'#94a3b8',maxTicksLimit:8,font:{size:10}},grid:{color:'rgba(51,65,85,.4)'}},
+          y:{ticks:{color:'#94a3b8',font:{size:10},callback:v=>'$'+v.toFixed(0)},grid:{color:'rgba(51,65,85,.4)'}},
+        },
+      },
+    });
+    return()=>{ chartRef.current?.destroy(); chartRef.current=null; };
+  },[hist, alerts, tfMeta.showEma50, tfMeta.showEma200]);
+
+  // Cleanup on unmount
+  useEffect(()=>()=>{ chartRef.current?.destroy(); chartRef.current=null; },[]);
+
+  function addAlert(){
+    const p=parseFloat(newAlertPrice);
+    if(!p||p<=0) return;
+    const next={...holding, alerts:[...alerts, {
+      id:newId(), condition:newAlertCondition, price:p,
+      enabled:true, triggered:false, triggeredAt:null,
+    }]};
+    onUpdateHolding(next);
+    setNewAlertPrice('');
+  }
+  function toggleAlert(aid){
+    const next={...holding, alerts:alerts.map(a=>a.id===aid?{...a, enabled:!(a.enabled!==false)}:a)};
+    onUpdateHolding(next);
+  }
+  function resetAlert(aid){
+    const next={...holding, alerts:alerts.map(a=>a.id===aid?{...a, triggered:false, triggeredAt:null}:a)};
+    onUpdateHolding(next);
+  }
+  function deleteAlert(aid){
+    const next={...holding, alerts:alerts.filter(a=>a.id!==aid)};
+    onUpdateHolding(next);
+  }
+  function toggleEma(key){
+    const next={...holding, emaTriggers:{...emaTriggers, [key]:!emaTriggers[key]}};
+    onUpdateHolding(next);
+  }
+
+  const curPrice=livePrice?.price;
+  const dayPct=livePrice?.pct;
+
+  return(
+    <div className="modal-bg" onClick={e=>e.target===e.currentTarget&&onClose()}>
+      <div className="modal modal-lg" style={{maxWidth:760}}>
+        <div className="mh">
+          <div>
+            <div className="mt">{holding.symbol} {curPrice!=null && <span style={{fontSize:14,color:'var(--muted)',fontWeight:500,marginLeft:8}}>${curPrice.toFixed(2)}</span>}
+              {dayPct!=null && <span style={{fontSize:12,fontWeight:600,marginLeft:8}} className={dayPct>=0?'pos':'neg'}>{dayPct>=0?'+':''}{dayPct.toFixed(2)}%</span>}
+            </div>
+            <div style={{fontSize:11,color:'var(--dim)',marginTop:2}}>Chart · price alerts · EMA support/resistance</div>
+          </div>
+          <button className="mx" onClick={onClose}>✕</button>
+        </div>
+
+        <div style={{display:'flex',gap:4,flexWrap:'wrap',marginBottom:10}}>
+          {CHART_TIMEFRAMES.map(tf=>(
+            <button key={tf.id} onClick={()=>setRange(tf.id)}
+              className={`btn btn-sm ${range===tf.id?'btn-primary':'btn-ghost'}`}
+              style={{padding:'4px 12px',fontSize:11,fontWeight:600}}>
+              {tf.label}
+            </button>
+          ))}
+        </div>
+
+        <div style={{position:'relative',height:300,marginBottom:6,background:'var(--bg)',borderRadius:'var(--rs)',padding:'10px 8px'}}>
+          {fetching && <div style={{position:'absolute',inset:0,display:'flex',alignItems:'center',justifyContent:'center',color:'var(--dim)',fontSize:12,gap:8}}><span className="spin spin-sm"/> Loading…</div>}
+          {err && !fetching && <div style={{position:'absolute',inset:0,display:'flex',alignItems:'center',justifyContent:'center',color:'var(--red)',fontSize:12}}>{err}</div>}
+          {!fetching && !err && hist && <canvas ref={canvasRef}/>}
+          {!fetching && !err && !hist && <div style={{position:'absolute',inset:0,display:'flex',alignItems:'center',justifyContent:'center',color:'var(--dim)',fontSize:12}}>No data</div>}
+        </div>
+        <div style={{fontSize:10,color:'var(--dim)',marginBottom:14,display:'flex',gap:14,flexWrap:'wrap'}}>
+          <span><span style={{display:'inline-block',width:10,height:2,background:'#3b82f6',verticalAlign:'middle',marginRight:4}}/>Price</span>
+          {tfMeta.showEma50  && <span><span style={{display:'inline-block',width:10,height:2,background:'#f59e0b',verticalAlign:'middle',marginRight:4}}/>EMA 50 (support/resistance)</span>}
+          {tfMeta.showEma200 && <span><span style={{display:'inline-block',width:10,height:2,background:'#ef4444',verticalAlign:'middle',marginRight:4}}/>EMA 200 (support/resistance)</span>}
+          {!tfMeta.showEma200 && <span style={{color:'var(--dim)'}}>EMA 200 needs ≥1Y data</span>}
+        </div>
+
+        {/* Price alerts */}
+        <div style={{borderTop:'1px solid var(--border)',paddingTop:14,marginBottom:14}}>
+          <div style={{fontSize:11,fontWeight:800,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.05em',marginBottom:10}}>🔔 Price Alerts</div>
+          {alerts.length===0 && <div style={{fontSize:12,color:'var(--dim)',marginBottom:10}}>No alerts set. Add one below — fires when the live price crosses the level.</div>}
+          {alerts.map(a=>(
+            <div key={a.id} style={{display:'flex',alignItems:'center',gap:8,padding:'8px 10px',background:'var(--bg)',borderRadius:'var(--rs)',marginBottom:6,fontSize:12,flexWrap:'wrap'}}>
+              <span style={{minWidth:14}}>{a.condition==='above'?'▲':'▼'}</span>
+              <span style={{fontWeight:600}}>{a.condition==='above'?'Above':'Below'}</span>
+              <span style={{fontWeight:700,color:'var(--text)'}}>${Number(a.price).toFixed(2)}</span>
+              {a.triggered && <span className="tag" style={{background:'rgba(245,158,11,.18)',color:'#fcd34d'}}>Triggered {a.triggeredAt?new Date(a.triggeredAt).toLocaleDateString():''}</span>}
+              {!a.triggered && (a.enabled!==false) && <span className="tag" style={{background:'rgba(34,197,94,.18)',color:'#86efac'}}>Armed</span>}
+              {!a.triggered && (a.enabled===false) && <span className="tag" style={{background:'rgba(148,163,184,.18)',color:'#94a3b8'}}>Paused</span>}
+              <div style={{marginLeft:'auto',display:'flex',gap:4}}>
+                {a.triggered && <button className="btn btn-ghost btn-sm" onClick={()=>resetAlert(a.id)}>Reset</button>}
+                <button className="btn btn-ghost btn-sm" onClick={()=>toggleAlert(a.id)}>{a.enabled===false?'Resume':'Pause'}</button>
+                <button className="btn-del" onClick={()=>deleteAlert(a.id)} title="Delete">✕</button>
+              </div>
+            </div>
+          ))}
+          <div style={{display:'flex',gap:6,alignItems:'center',marginTop:8}}>
+            <select value={newAlertCondition} onChange={e=>setNewAlertCondition(e.target.value)} style={{width:110,padding:'7px 8px',fontSize:12}}>
+              <option value="above">▲ Above</option>
+              <option value="below">▼ Below</option>
+            </select>
+            <input type="number" step="0.01" min="0" placeholder={curPrice?curPrice.toFixed(2):'Price'}
+              value={newAlertPrice} onChange={e=>setNewAlertPrice(e.target.value)}
+              onKeyDown={e=>e.key==='Enter'&&addAlert()}
+              style={{flex:1,padding:'7px 9px',fontSize:12}}/>
+            <button className="btn btn-primary btn-sm" onClick={addAlert} disabled={!newAlertPrice||!(parseFloat(newAlertPrice)>0)}>+ Add</button>
+          </div>
+        </div>
+
+        {/* EMA triggers */}
+        <div style={{borderTop:'1px solid var(--border)',paddingTop:14}}>
+          <div style={{fontSize:11,fontWeight:800,color:'var(--muted)',textTransform:'uppercase',letterSpacing:'.05em',marginBottom:10}}>📐 EMA Support/Resistance Triggers</div>
+          <div style={{fontSize:11,color:'var(--dim)',marginBottom:10}}>Notify when the live price crosses an EMA line, or when EMA 50 crosses EMA 200 (golden/death cross). Evaluated on every price refresh.</div>
+          {[
+            {key:'priceCrossEma50',  label:'Price crosses EMA 50',  hint:'Short-term support/resistance'},
+            {key:'priceCrossEma200', label:'Price crosses EMA 200', hint:'Long-term support/resistance'},
+            {key:'goldenDeathCross', label:'Golden / Death cross (EMA 50 vs EMA 200)', hint:'Bullish ↑ / bearish ↓ trend signal'},
+          ].map(row=>(
+            <label key={row.key} style={{display:'flex',alignItems:'center',gap:10,padding:'8px 10px',background:'var(--bg)',borderRadius:'var(--rs)',marginBottom:6,cursor:'pointer',textTransform:'none',letterSpacing:0,color:'var(--text)',fontSize:12,fontWeight:500}}>
+              <input type="checkbox" checked={!!emaTriggers[row.key]} onChange={()=>toggleEma(row.key)} style={{width:16,height:16,margin:0,flexShrink:0}}/>
+              <div style={{flex:1}}>
+                <div style={{fontWeight:600}}>{row.label}</div>
+                <div style={{fontSize:10,color:'var(--dim)',marginTop:1}}>{row.hint}</div>
+              </div>
+            </label>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /* ─── App ─── */
 function App(){
   const[data,setData]=useState(()=>loadData());
@@ -4709,6 +5108,8 @@ function App(){
   const[lastUpdated,setLastUpdated]=useState(null);
   const dataRef=useRef(data);
   useEffect(()=>{dataRef.current=data;},[data]);
+  // Wire the global notify() bridge to our toast system
+  useEffect(()=>{ _setToastBridge(toast); return()=>_setToastBridge(null); },[toast]);
 
   // ── portfolio history (local, not synced) ──
   const[history,setHistory]=useState(loadHistory);
@@ -4891,6 +5292,7 @@ function App(){
     dataRef.current.portfolios.forEach(p=>p.holdings.forEach(h=>syms.add(h.symbol)));
     if(!syms.size)return;
     setLoading(true);
+    const prevPrices={...loadPriceCache()};
     try{
       const p=await getPrices([...syms], opts);
       const n=Object.keys(p).length;
@@ -4915,7 +5317,133 @@ function App(){
         });
         return nh;
       });
+      // Evaluate price alerts + EMA crosses across ALL portfolios
+      evaluateTriggers(prevPrices, p).catch(err=>console.warn('[Triggers]', err));
     }finally{setLoading(false);}
+  },[]);
+
+  // Evaluate price alerts and EMA crosses for every holding in every portfolio.
+  // Called after each successful price refresh. Mutates holdings via setData
+  // when alerts fire (to flip `triggered:true`). EMA crosses don't mutate data —
+  // they just fire notifications, dedupe-keyed by symbol+kind+direction.
+  const evaluateTriggers=useCallback(async(prevPrices, currPrices)=>{
+    const d=dataRef.current;
+    if(!d?.portfolios) return;
+
+    // 1) Price alerts ─────────────────────────────────────────────
+    let alertsFired=false;
+    const nextData={...d, portfolios:d.portfolios.map(port=>({
+      ...port,
+      holdings:port.holdings.map(h=>{
+        const alerts=h.alerts||[];
+        if(!alerts.length) return h;
+        const prev=prevPrices[h.symbol]?.price;
+        const curr=currPrices[h.symbol]?.price ?? prevPrices[h.symbol]?.price;
+        if(curr==null) return h;
+        let changed=false;
+        const updated=alerts.map(a=>{
+          if(a.enabled===false||a.triggered) return a;
+          const p=Number(a.price);
+          if(!p||isNaN(p)) return a;
+          let fired=false;
+          if(a.condition==='above'){
+            if(prev!=null && prev<p && curr>=p) fired=true;
+            else if(prev==null && curr>=p) fired=true;
+          } else {
+            if(prev!=null && prev>p && curr<=p) fired=true;
+            else if(prev==null && curr<=p) fired=true;
+          }
+          if(fired){
+            notify(
+              `${h.symbol} ${a.condition} ${a.price}`,
+              `Live price ${curr.toFixed(2)} crossed ${a.condition} target ${Number(a.price).toFixed(2)}`,
+              `alert-${h.id}-${a.id}`,
+            );
+            alertsFired=true;
+            changed=true;
+            return{...a, triggered:true, triggeredAt:new Date().toISOString()};
+          }
+          return a;
+        });
+        return changed ? {...h, alerts:updated} : h;
+      }),
+    }))};
+    if(alertsFired){
+      setData(nextData);
+      saveData(nextData);
+    }
+
+    // 2) EMA crosses ─────────────────────────────────────────────
+    const emaState=loadEmaState();
+    let emaStateChanged=false;
+    // Collect all symbols across portfolios that have ANY EMA trigger enabled
+    const symbolsToCheck=new Set();
+    for(const port of d.portfolios){
+      for(const h of (port.holdings||[])){
+        const t=h.emaTriggers||{};
+        if(t.priceCrossEma50 || t.priceCrossEma200 || t.goldenDeathCross){
+          symbolsToCheck.add(h.symbol);
+        }
+      }
+    }
+    for(const sym of symbolsToCheck){
+      const curPrice=currPrices[sym]?.price ?? prevPrices[sym]?.price;
+      if(curPrice==null) continue;
+      // Use 1y range as the EMA source-of-truth (≥200 trading days)
+      const hist=await fetchHistoricalPrices(sym, '1y');
+      if(!hist || hist.closes.length<50) continue;
+      const ema50arr=calculateEMA(hist.closes, 50);
+      const ema200arr=calculateEMA(hist.closes, 200);
+      const ema50=ema50arr[ema50arr.length-1];
+      const ema200=ema200arr[ema200arr.length-1];
+      const prev=emaState[sym]||{};
+      // Find holdings that own this symbol (across portfolios) for trigger flags
+      const owners=[];
+      for(const port of d.portfolios){
+        for(const h of port.holdings){
+          if(h.symbol===sym) owners.push(h);
+        }
+      }
+      const tFlags=owners.reduce((acc,h)=>{
+        const t=h.emaTriggers||{};
+        acc.priceCrossEma50  = acc.priceCrossEma50  || !!t.priceCrossEma50;
+        acc.priceCrossEma200 = acc.priceCrossEma200 || !!t.priceCrossEma200;
+        acc.goldenDeathCross = acc.goldenDeathCross || !!t.goldenDeathCross;
+        return acc;
+      },{});
+
+      if(tFlags.priceCrossEma50 && ema50!=null && prev.lastPrice!=null && prev.ema50!=null){
+        const dir=detectCross(prev.lastPrice, curPrice, prev.ema50, ema50);
+        if(dir){
+          notify(
+            `${sym}: Price crossed EMA 50 ${dir==='up'?'↑':'↓'}`,
+            `Now ${curPrice.toFixed(2)} · EMA 50 ${ema50.toFixed(2)} — ${dir==='up'?'broke above (resistance flipped to support)':'broke below (support flipped to resistance)'}`,
+            `ema50-${sym}-${dir}`,
+          );
+        }
+      }
+      if(tFlags.priceCrossEma200 && ema200!=null && prev.lastPrice!=null && prev.ema200!=null){
+        const dir=detectCross(prev.lastPrice, curPrice, prev.ema200, ema200);
+        if(dir){
+          notify(
+            `${sym}: Price crossed EMA 200 ${dir==='up'?'↑':'↓'}`,
+            `Now ${curPrice.toFixed(2)} · EMA 200 ${ema200.toFixed(2)} — long-term ${dir==='up'?'support taken back':'support broken'}`,
+            `ema200-${sym}-${dir}`,
+          );
+        }
+      }
+      if(tFlags.goldenDeathCross && ema50!=null && ema200!=null && prev.ema50!=null && prev.ema200!=null){
+        const dir=detectCross(prev.ema50, ema50, prev.ema200, ema200);
+        if(dir==='up'){
+          notify(`${sym}: 🌟 Golden Cross`, `EMA 50 (${ema50.toFixed(2)}) crossed above EMA 200 (${ema200.toFixed(2)}) — bullish trend signal`, `gc-${sym}`);
+        } else if(dir==='down'){
+          notify(`${sym}: 💀 Death Cross`, `EMA 50 (${ema50.toFixed(2)}) crossed below EMA 200 (${ema200.toFixed(2)}) — bearish trend signal`, `dc-${sym}`);
+        }
+      }
+      emaState[sym]={ema50, ema200, lastPrice:curPrice, lastCheckedAt:Date.now()};
+      emaStateChanged=true;
+    }
+    if(emaStateChanged) saveEmaState(emaState);
   },[]);
 
   // Manual refresh — always force, ignore cache, useful when user clicks "↻"
@@ -4938,6 +5466,8 @@ function App(){
   const addPhoto=(hid,photo)=>withPortfolio(p=>({...p,holdings:p.holdings.map(h=>h.id===hid?{...h,photo}:h)}));
   const setHoldingTags=(hid,tags)=>withPortfolio(p=>({...p,holdings:p.holdings.map(h=>h.id===hid?{...h,tags:tags.filter(Boolean)}:h)}));
   const setHoldingTarget=(hid,pct)=>withPortfolio(p=>({...p,holdings:p.holdings.map(h=>h.id===hid?{...h,targetAllocation:pct}:h)}));
+  // Replace a holding wholesale (used by StockChartModal for alerts + emaTriggers edits)
+  const updateHolding=(next)=>withPortfolio(p=>({...p,holdings:p.holdings.map(h=>h.id===next.id?next:h)}));
 
   // Live indicator: is a background news fetch currently running?
   const[newsFetching,setNewsFetching]=useState(false);
@@ -5005,7 +5535,7 @@ function App(){
       <main className="main">
         {tab==='home'&&<HomeDashboard portfolios={data.portfolios}prices={prices}loading={loading}history={history}onSwitch={id=>{switchPortfolio(id);setTab('dashboard');}}/>}
         {tab==='dashboard'&&<Dashboard portfolio={activePortfolio}prices={prices}loading={loading}onRefresh={refreshForce}history={history[activePortfolio?.id]||[]}/>}
-        {tab==='holdings'&&<HoldingsPage portfolio={activePortfolio}prices={prices}loading={loading}onAdd={addHolding}onImportBulk={importHoldings}onAddTrade={addTrade}onAddDividend={addDividend}onDeleteTrade={deleteTrade}onDeleteDividend={deleteDividend}onDeleteHolding={deleteHolding}onRefresh={refreshForce}onSetPhoto={addPhoto}onSetTags={setHoldingTags}onSetTarget={setHoldingTarget}/>}
+        {tab==='holdings'&&<HoldingsPage portfolio={activePortfolio}prices={prices}loading={loading}onAdd={addHolding}onImportBulk={importHoldings}onAddTrade={addTrade}onAddDividend={addDividend}onDeleteTrade={deleteTrade}onDeleteDividend={deleteDividend}onDeleteHolding={deleteHolding}onRefresh={refreshForce}onSetPhoto={addPhoto}onSetTags={setHoldingTags}onSetTarget={setHoldingTarget}onUpdateHolding={updateHolding}/>}
         {tab==='charts'&&<ChartsPage portfolio={activePortfolio}prices={prices}history={history[activePortfolio?.id]||[]}/>}
         {tab==='news'&&<NewsPage portfolio={activePortfolio}/>}
         {tab==='settings'&&<SettingsPage data={data}onRenamePortfolio={renamePortfolio}onDeletePortfolio={deletePortfolio}onAddPortfolio={addPortfolio}onClearAll={()=>{setData(defaultData());setPrices({});saveData(defaultData());toast('All data cleared');}} onSetCurrency={ccy=>{upd(d=>({...d,displayCurrency:ccy}));toast(`Display currency: ${ccy}`,'ok');}} user={user} syncing={syncing}/>}
