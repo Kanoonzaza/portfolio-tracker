@@ -187,8 +187,8 @@
       }
     }
   </script>
-  <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
-  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 
@@ -445,7 +445,7 @@ const { useState, useEffect, useRef, useCallback, useMemo } = React;
 /* ─── constants ─── */
 // VERSION marker — if you don't see this log in the console, the browser
 // is running cached old code. Build timestamp updated on each edit.
-const APP_VERSION='v7.13.1-debug-2026-05-24';
+const APP_VERSION='v7.14-2026-05-24';
 console.log('%c🚀 Portfolio Tracker '+APP_VERSION,'background:#3b82f6;color:white;padding:4px 10px;border-radius:4px;font-weight:bold;font-size:14px');
 console.log('%cOrigin: '+location.origin+(location.protocol==='file:'?' ⚠️ (use start-portfolio-tracker.bat to run via localhost)':' ✓'),'color:'+(location.protocol==='file:'?'#ef4444':'#22c55e')+';font-weight:bold');
 const STORE='ptv3', STORE_OLD='ptv2';
@@ -2993,23 +2993,11 @@ function LineChart({series, height=260, showCost=true, benchmark=null, benchmark
     ro.observe(wrapRef.current);
     return()=>ro.disconnect();
   },[]);
-  if(!series || series.length<2){
-    return(
-      <div ref={wrapRef} style={{padding:'40px 20px',textAlign:'center',color:'var(--dim)',fontSize:12}}>
-        Not enough history yet — at least 2 daily snapshots are needed. Snapshots are saved automatically when prices refresh.
-      </div>
-    );
-  }
-  const padL=56, padR=16, padT=20, padB=32;
-  const innerW=Math.max(40, width-padL-padR);
-  const innerH=height-padT-padB;
-  const values=series.map(s=>s.value);
-  const costs=series.map(s=>s.cost||0);
-
-  // Normalize benchmark: align by date and scale so it starts at series[0].value.
-  // Result is an array of {value} per series date (null if benchmark has no data
-  // for that date). Used as a side-by-side comparison of % growth.
+  // Hook order must be identical on every render — keep useMemo ABOVE any
+  // early return. Returns null on the empty-series path so the early-return
+  // branch below stays safe to render.
   const benchAligned=useMemo(()=>{
+    if(!series || series.length<2) return null;
     if(!benchmark || benchmark.length<2) return null;
     const bmMap={};
     for(const b of benchmark) bmMap[b.date]=b.close;
@@ -3030,6 +3018,18 @@ function LineChart({series, height=260, showCost=true, benchmark=null, benchmark
     const scale=series[0].value/out[0];
     return out.map(v=>v==null?null:v*scale);
   },[benchmark, series]);
+  if(!series || series.length<2){
+    return(
+      <div ref={wrapRef} style={{padding:'40px 20px',textAlign:'center',color:'var(--dim)',fontSize:12}}>
+        Not enough history yet — at least 2 daily snapshots are needed. Snapshots are saved automatically when prices refresh.
+      </div>
+    );
+  }
+  const padL=56, padR=16, padT=20, padB=32;
+  const innerW=Math.max(40, width-padL-padR);
+  const innerH=height-padT-padB;
+  const values=series.map(s=>s.value);
+  const costs=series.map(s=>s.cost||0);
   const benchValues=benchAligned ? benchAligned.filter(v=>v!=null) : [];
 
   const allNums=[...(showCost ? values.concat(costs) : values), ...benchValues];
