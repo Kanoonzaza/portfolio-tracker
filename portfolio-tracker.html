@@ -13,16 +13,28 @@
   <script>
     // Register the service worker only when served via http(s) — file:// can't host one.
     if('serviceWorker' in navigator && location.protocol.startsWith('http')){
+      // Capture whether a SW was already controlling this page at load time.
+      // First install has no prior controller — activation is NOT an "update",
+      // so we must NOT reload (that's what caused the Android stuck-on-open loop).
+      const hadController = !!navigator.serviceWorker.controller;
       window.addEventListener('load', ()=>{
         navigator.serviceWorker.register('service-worker.js').then(reg=>{
           console.log('[PWA] Service worker registered, scope:', reg.scope);
-          // Force-check for a new SW version on every page load (bypasses browser cache on SW file)
+          // Force-check for a new SW version on every page load
           reg.update();
-          // When the new SW takes control, reload once to get fresh HTML/assets automatically
-          let reloading=false;
-          navigator.serviceWorker.addEventListener('controllerchange', ()=>{
-            if(!reloading){ reloading=true; window.location.reload(); }
-          });
+          // Only auto-reload if (a) there was already a SW controlling this page
+          // AND (b) we haven't already reloaded once this session — belt-and-braces
+          // against any future runaway loop.
+          if(hadController && !sessionStorage.getItem('sw-reloaded')){
+            let reloading=false;
+            navigator.serviceWorker.addEventListener('controllerchange', ()=>{
+              if(!reloading){
+                reloading=true;
+                sessionStorage.setItem('sw-reloaded','1');
+                window.location.reload();
+              }
+            });
+          }
         }).catch(err=>console.warn('[PWA] SW registration failed:', err.message));
       });
     }
@@ -285,7 +297,7 @@ const { useState, useEffect, useRef, useCallback, useMemo } = React;
 /* ─── constants ─── */
 // VERSION marker — if you don't see this log in the console, the browser
 // is running cached old code. Build timestamp updated on each edit.
-const APP_VERSION='v7.9.2-sw-autoupdate-2026-05-24';
+const APP_VERSION='v7.10-news-feed-2026-05-24';
 console.log('%c🚀 Portfolio Tracker '+APP_VERSION,'background:#3b82f6;color:white;padding:4px 10px;border-radius:4px;font-weight:bold;font-size:14px');
 console.log('%cOrigin: '+location.origin+(location.protocol==='file:'?' ⚠️ (use start-portfolio-tracker.bat to run via localhost)':' ✓'),'color:'+(location.protocol==='file:'?'#ef4444':'#22c55e')+';font-weight:bold');
 const STORE='ptv3', STORE_OLD='ptv2';
@@ -3991,6 +4003,7 @@ function RealizedTaxView({portfolio}){
 const NEWS_CACHE_KEY='ptv3-news-cache';
 const NEWS_MAX_AGE_MS=24*60*60*1000; // 24 hours — re-fetch interval
 const NEWS_ITEM_MAX_AGE_MS=7*24*60*60*1000; // 7 days — items older than this are pruned
+const NEWS_RECENT_MS=2*24*60*60*1000; // 2 days — default visible window on News page (older items only surface via search)
 
 // Muted tickers: news for symbols in this set is hidden + not fetched.
 const NEWS_MUTED_KEY='ptv3-news-muted';
@@ -4228,7 +4241,6 @@ function NewsPage({portfolio}){
   // Muted tickers — news for these is hidden + not fetched
   const[mutedSet,setMutedSet]=useState(()=>loadMutedNews());
   const[showMuted,setShowMuted]=useState(false); // toggle to reveal muted section
-  const[collapsedSyms,setCollapsedSyms]=useState(new Set());
 
   // Active = symbols whose news we DO want to follow
   const symbols=useMemo(()=>allSymbols.filter(s=>!mutedSet.has(s)),[allSymbols,mutedSet]);
@@ -4286,38 +4298,40 @@ function NewsPage({portfolio}){
     const next=new Set(mutedSet); next.delete(sym);
     setMutedSet(next); saveMutedNews(next);
   }
-  function toggleCollapse(sym){
-    const next=new Set(collapsedSyms);
-    if(next.has(sym)) next.delete(sym); else next.add(sym);
-    setCollapsedSyms(next);
-  }
   // Called by the UpcomingEvents strip when a ticker chip is clicked.
-  // Collapse every other ticker group and scroll the focus one into view.
+  // Now that the feed is flat, just type the ticker into the search box —
+  // that surfaces all its news (including older than the 2-day default).
   function focusSymbol(sym){
-    const others=new Set(symbols.filter(s=>s!==sym));
-    setCollapsedSyms(others);
-    setTimeout(()=>{
-      const el=document.getElementById(`news-group-${sym}`);
-      if(el) el.scrollIntoView({behavior:'smooth', block:'start'});
-    }, 60);
+    setSearch(sym);
+    setTimeout(()=>window.scrollTo({top:0,behavior:'smooth'}),60);
   }
 
-  // Group news items per ticker (newest first within each group).
-  // Apply search filter at item level; ticker still appears (with 0 matches) if user is searching.
-  const groups=useMemo(()=>{
+  // Flat chronological feed across all followed tickers.
+  //   - no search   → only items from the last NEWS_RECENT_MS (2 days)
+  //   - with search → ALL matching items across all dates (so older news for a
+  //                   specific stock surfaces when you type its ticker / a keyword)
+  const items=useMemo(()=>{
     const q=search.trim().toLowerCase();
-    return symbols.map(sym=>{
-      let items=cache[sym]?.items||[];
-      items=[...items].sort((a,b)=>(b.time||0)-(a.time||0));
-      if(q){
-        items=items.filter(n=>(n.title||'').toLowerCase().includes(q)||(n.publisher||'').toLowerCase().includes(q)||(n.summary||'').toLowerCase().includes(q));
-      }
-      if(hideRead) items=items.filter(n=>!readSet.has(n.link));
-      return{sym, items, fetchedAt:cache[sym]?.fetchedAt||null};
-    });
+    const recentCutoff=Date.now()-NEWS_RECENT_MS;
+    let flat=[];
+    for(const sym of symbols){
+      const arr=cache[sym]?.items||[];
+      for(const n of arr) flat.push({...n, sym});
+    }
+    flat.sort((a,b)=>(b.time||0)-(a.time||0));
+    if(q){
+      flat=flat.filter(n=>(n.title||'').toLowerCase().includes(q)
+        ||(n.publisher||'').toLowerCase().includes(q)
+        ||(n.summary||'').toLowerCase().includes(q)
+        ||(n.sym||'').toLowerCase().includes(q));
+    }else{
+      flat=flat.filter(n=>(n.time||0)>recentCutoff);
+    }
+    if(hideRead) flat=flat.filter(n=>!readSet.has(n.link));
+    return flat;
   },[cache,symbols,search,hideRead,readSet]);
 
-  const allItems=useMemo(()=>groups.flatMap(g=>g.items),[groups]);
+  const allItems=items;
 
   function markRead(link){
     if(readSet.has(link)) return;
@@ -4363,9 +4377,12 @@ function NewsPage({portfolio}){
       <div className="ph">
         <h1 className="pt">News</h1>
         <p className="ps">
-          Grouped by holding · {symbols.length} followed{mutedSymbols.length>0?` · ${mutedSymbols.length} muted`:''}
+          {search.trim()
+            ? `Searching all cached news · ${symbols.length} followed`
+            : `Last 2 days · ${symbols.length} followed`}
+          {mutedSymbols.length>0?` · ${mutedSymbols.length} muted`:''}
           {oldestFetch && ` · last refreshed ${fmtAgo(oldestFetch)}`}
-          <span style={{color:'var(--dim)',marginLeft:6}}>· auto-deleted after 7 days</span>
+          <span style={{color:'var(--dim)',marginLeft:6}}>· auto-deleted after 7 days · type a ticker to see older news</span>
         </p>
       </div>
       <div className="toolbar" style={{gap:8,flexWrap:'wrap'}}>
@@ -4458,69 +4475,51 @@ function NewsPage({portfolio}){
             </div>
           </div>
         </div>
+      ) : items.length===0 ? (
+        <div className="card">
+          <div className="empty">
+            <div className="empty-i">📰</div>
+            <div className="empty-t">{search.trim()?'No headlines match your search':'No news in the last 2 days'}</div>
+            <div className="empty-s">
+              {search.trim()
+                ?'Try a different keyword or clear the search to see the latest headlines.'
+                :'Type a ticker symbol in the search box above to surface older headlines for a specific stock.'}
+            </div>
+          </div>
+        </div>
       ) : (
-        <div style={{display:'grid',gap:14}}>
-          {groups.map(g=>{
-            const collapsed=collapsedSyms.has(g.sym);
-            return(
-              <div key={g.sym} id={`news-group-${g.sym}`} className="card">
-                <div style={{display:'flex',alignItems:'center',gap:10,padding:'12px 16px',borderBottom:collapsed?'none':'1px solid var(--border)'}}>
-                  <button onClick={()=>toggleCollapse(g.sym)} className="btn-del" style={{fontSize:12,color:'var(--muted)'}} title={collapsed?'Expand':'Collapse'}>
-                    {collapsed?'▸':'▾'}
-                  </button>
-                  <span style={{background:'rgba(59,130,246,.15)',color:'var(--blue)',padding:'3px 10px',borderRadius:4,fontSize:12,fontWeight:700}}>
-                    {g.sym}
-                  </span>
-                  <span style={{fontSize:12,color:'var(--muted)'}}>
-                    {g.items.length} headline{g.items.length!==1?'s':''}
-                  </span>
-                  {g.fetchedAt && (
-                    <span style={{fontSize:11,color:'var(--dim)',marginLeft:4}}>
-                      · updated {fmtAgo(g.fetchedAt)}
+        <div className="card" style={{padding:0,overflow:'hidden'}}>
+          <div style={{display:'grid',gap:1,background:'var(--border)'}}>
+            {items.map((n,i)=>{
+              const isRead=readSet.has(n.link);
+              return(
+                <a key={n.link+i} href={n.link} target="_blank" rel="noopener noreferrer"
+                  onClick={()=>markRead(n.link)}
+                  style={{display:'block',padding:'12px 16px',textDecoration:'none',color:'inherit',background:'var(--bg2)',transition:'background .15s, opacity .15s',opacity:isRead?0.55:1}}
+                  onMouseEnter={e=>e.currentTarget.style.background='rgba(59,130,246,.05)'}
+                  onMouseLeave={e=>e.currentTarget.style.background='var(--bg2)'}>
+                  <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:5,flexWrap:'wrap'}}>
+                    <span
+                      onClick={e=>{e.preventDefault();e.stopPropagation();setSearch(n.sym);window.scrollTo({top:0,behavior:'smooth'});}}
+                      style={{background:'rgba(59,130,246,.15)',color:'var(--blue)',padding:'2px 8px',borderRadius:4,fontSize:11,fontWeight:700,cursor:'pointer'}}
+                      title={`Show all cached news for ${n.sym}`}>
+                      {n.sym}
                     </span>
+                    <span style={{color:'var(--dim)',fontSize:11}}>{n.publisher}</span>
+                    {isRead && <span style={{color:'var(--dim)',fontSize:10,fontStyle:'italic'}}>· read</span>}
+                    <span style={{color:'var(--dim)',fontSize:11,marginLeft:'auto'}}>{fmtAgo(n.time)}</span>
+                  </div>
+                  <div style={{fontSize:13,fontWeight:isRead?500:600,lineHeight:1.4}}>{n.title}</div>
+                  {n.summary && (
+                    <div style={{fontSize:12,color:'var(--muted)',lineHeight:1.5,marginTop:5,
+                      display:'-webkit-box',WebkitLineClamp:2,WebkitBoxOrient:'vertical',overflow:'hidden'}}>
+                      {n.summary}
+                    </div>
                   )}
-                  <button className="btn btn-ghost btn-sm" style={{marginLeft:'auto'}}
-                    onClick={async()=>{ if(await uiConfirm(`Stop following news for ${g.sym}? You can unmute later from the 🔇 Muted button.`,{okLabel:'Mute'})) muteSym(g.sym); }}
-                    title={`Stop receiving news for ${g.sym}`}>
-                    🔇 Mute
-                  </button>
-                </div>
-                {!collapsed && (
-                  g.items.length===0 ? (
-                    <div style={{padding:'18px 16px',fontSize:12,color:'var(--dim)',textAlign:'center'}}>
-                      {search.trim()?'No headlines match your search.':'No cached headlines yet.'}
-                    </div>
-                  ) : (
-                    <div style={{display:'grid',gap:1,background:'var(--border)'}}>
-                      {g.items.map((n,i)=>{
-                        const isRead=readSet.has(n.link);
-                        return(
-                          <a key={n.link+i} href={n.link} target="_blank" rel="noopener noreferrer"
-                            onClick={()=>markRead(n.link)}
-                            style={{display:'block',padding:'12px 16px',textDecoration:'none',color:'inherit',background:'var(--bg2)',transition:'background .15s, opacity .15s',opacity:isRead?0.55:1}}
-                            onMouseEnter={e=>e.currentTarget.style.background='rgba(59,130,246,.05)'}
-                            onMouseLeave={e=>e.currentTarget.style.background='var(--bg2)'}>
-                            <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:4,flexWrap:'wrap'}}>
-                              <span style={{color:'var(--dim)',fontSize:11}}>{n.publisher}</span>
-                              {isRead && <span style={{color:'var(--dim)',fontSize:10,fontStyle:'italic'}}>· read</span>}
-                              <span style={{color:'var(--dim)',fontSize:11,marginLeft:'auto'}}>{fmtAgo(n.time)}</span>
-                            </div>
-                            <div style={{fontSize:13,fontWeight:isRead?500:600,lineHeight:1.4}}>{n.title}</div>
-                            {n.summary && (
-                              <div style={{fontSize:12,color:'var(--muted)',lineHeight:1.5,marginTop:5,
-                                display:'-webkit-box',WebkitLineClamp:2,WebkitBoxOrient:'vertical',overflow:'hidden'}}>
-                                {n.summary}
-                              </div>
-                            )}
-                          </a>
-                        );
-                      })}
-                    </div>
-                  )
-                )}
-              </div>
-            );
-          })}
+                </a>
+              );
+            })}
+          </div>
         </div>
       )}
     </div>
