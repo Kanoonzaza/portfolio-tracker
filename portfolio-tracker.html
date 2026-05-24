@@ -53,18 +53,55 @@
           sessionStorage.setItem('lastErrors', JSON.stringify(arr.slice(-10)));
         }catch{}
       }
+      // Extract user-code frames from a stack — skip react/babel/unpkg internals
+      // so the banner shows the component name, not just react-dom.development.js
+      function cleanStack(stack){
+        if(!stack) return '';
+        const lines=String(stack).split('\n').map(s=>s.trim()).filter(Boolean);
+        const keep=[];
+        for(const l of lines){
+          // skip frames from react, react-dom, babel, browser internals
+          if(/react(-dom)?\.(development|production)/.test(l)) continue;
+          if(/babel\.min\.js|babel-standalone/.test(l)) continue;
+          if(/^Error:?/i.test(l)) continue;
+          keep.push(l);
+          if(keep.length>=4) break;
+        }
+        return keep.length ? '\n  ' + keep.join('\n  ') : '';
+      }
       window.addEventListener('error', e=>{
         const where = e.filename ? ` @ ${String(e.filename).split('/').pop()}:${e.lineno||'?'}` : '';
-        const msg = `[ERR] ${e.message||'unknown error'}${where}`;
-        persistErr({type:'error', msg:e.message, where});
+        const stack = cleanStack(e.error && e.error.stack);
+        const msg = `[ERR] ${e.message||'unknown error'}${where}${stack}`;
+        persistErr({type:'error', msg:e.message, where, stack});
         pushBanner(msg);
       });
       window.addEventListener('unhandledrejection', e=>{
         const r=e.reason;
-        const msg = `[PROMISE] ${(r&&(r.message||r.toString()))||'unknown rejection'}`;
-        persistErr({type:'rejection', msg:String(r&&(r.message||r))});
+        const stack = cleanStack(r && r.stack);
+        const msg = `[PROMISE] ${(r&&(r.message||r.toString()))||'unknown rejection'}${stack}`;
+        persistErr({type:'rejection', msg:String(r&&(r.message||r)), stack});
         pushBanner(msg);
       });
+      // Capture React's dev-build console.error warnings — these name the
+      // offending component in "rules of hooks" violations BEFORE the throw.
+      const _origConsoleError = console.error.bind(console);
+      console.error = function(...args){
+        try{
+          const text = args.map(a=>{
+            if(a==null) return String(a);
+            if(typeof a==='string') return a;
+            if(a instanceof Error) return a.message + (a.stack?cleanStack(a.stack):'');
+            try{ return JSON.stringify(a); }catch{ return String(a); }
+          }).join(' ');
+          // Only surface React-specific warnings to the banner to avoid noise
+          if(/hook|render|component|warning/i.test(text)){
+            persistErr({type:'console', msg:text.slice(0,800)});
+            pushBanner('[REACT] '+text.slice(0,800));
+          }
+        }catch{}
+        _origConsoleError(...args);
+      };
       // Replay any errors persisted from the previous page load
       try{
         const prior=JSON.parse(sessionStorage.getItem('lastErrors')||'[]');
@@ -73,7 +110,7 @@
           const recent=prior.filter(x=>Date.now()-x.t<60000);
           if(recent.length){
             window.addEventListener('DOMContentLoaded',()=>{
-              recent.forEach(x=>pushBanner(`[prev] ${x.msg||''}${x.where||''}`));
+              recent.forEach(x=>pushBanner(`[prev] ${x.msg||''}${x.where||''}${x.stack||''}`));
             });
           }
           sessionStorage.removeItem('lastErrors');
@@ -408,7 +445,7 @@ const { useState, useEffect, useRef, useCallback, useMemo } = React;
 /* ─── constants ─── */
 // VERSION marker — if you don't see this log in the console, the browser
 // is running cached old code. Build timestamp updated on each edit.
-const APP_VERSION='v7.13-debug-2026-05-24';
+const APP_VERSION='v7.13.1-debug-2026-05-24';
 console.log('%c🚀 Portfolio Tracker '+APP_VERSION,'background:#3b82f6;color:white;padding:4px 10px;border-radius:4px;font-weight:bold;font-size:14px');
 console.log('%cOrigin: '+location.origin+(location.protocol==='file:'?' ⚠️ (use start-portfolio-tracker.bat to run via localhost)':' ✓'),'color:'+(location.protocol==='file:'?'#ef4444':'#22c55e')+';font-weight:bold');
 const STORE='ptv3', STORE_OLD='ptv2';
