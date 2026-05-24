@@ -11,32 +11,143 @@
   <meta name="apple-mobile-web-app-title" content="Portfolio">
   <link rel="apple-touch-icon" href="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 192 192'><rect width='192' height='192' rx='32' fill='%230f172a'/><rect x='39' y='110' width='30' height='48' rx='4' fill='%233b82f6'/><rect x='81' y='80' width='30' height='78' rx='4' fill='%233b82f6'/><rect x='123' y='50' width='30' height='108' rx='4' fill='%233b82f6'/><path d='M 30 134 L 54 110 L 96 80 L 138 50 L 168 30' stroke='%2322c55e' stroke-width='6' fill='none' stroke-linecap='round' stroke-linejoin='round'/><circle cx='168' cy='30' r='6' fill='%2322c55e'/></svg>">
   <script>
-    // Register the service worker only when served via http(s) — file:// can't host one.
-    if('serviceWorker' in navigator && location.protocol.startsWith('http')){
-      // Capture whether a SW was already controlling this page at load time.
-      // First install has no prior controller — activation is NOT an "update",
-      // so we must NOT reload (that's what caused the Android stuck-on-open loop).
-      const hadController = !!navigator.serviceWorker.controller;
+    /* ─── Error reporter ──────────────────────────────────────────
+     * Shows uncaught errors as a red banner pinned to the top of the
+     * page. Crucial for diagnosing crashes on mobile where DevTools
+     * isn't easily available. Persists to sessionStorage so an error
+     * thrown right before a reload is still visible afterwards.
+     */
+    (function(){
+      function ensureBanner(){
+        let el=document.getElementById('__err_banner');
+        if(el) return el;
+        const create=()=>{
+          el=document.createElement('div');
+          el.id='__err_banner';
+          el.style.cssText='position:fixed;top:0;left:0;right:0;z-index:2147483647;background:#991b1b;color:#fff;font:12px/1.4 -apple-system,system-ui,sans-serif;padding:8px 36px 8px 12px;max-height:40vh;overflow:auto;box-shadow:0 2px 8px rgba(0,0,0,.4);white-space:pre-wrap;word-break:break-word';
+          const close=document.createElement('button');
+          close.textContent='×';
+          close.setAttribute('aria-label','Dismiss');
+          close.style.cssText='position:absolute;top:4px;right:8px;background:transparent;border:0;color:#fff;font-size:20px;line-height:1;cursor:pointer;padding:0 4px';
+          close.onclick=()=>el.remove();
+          el.appendChild(close);
+          document.body.appendChild(el);
+        };
+        if(document.body) create();
+        else document.addEventListener('DOMContentLoaded', create);
+        return null;
+      }
+      function pushBanner(msg){
+        const el=ensureBanner();
+        if(!el){ setTimeout(()=>pushBanner(msg), 50); return; }
+        const line=document.createElement('div');
+        line.textContent=msg;
+        line.style.cssText='border-top:1px solid rgba(255,255,255,.2);padding-top:4px;margin-top:4px';
+        if(el.children.length<=1) line.style.cssText='';
+        el.appendChild(line);
+      }
+      function persistErr(entry){
+        try{
+          const arr=JSON.parse(sessionStorage.getItem('lastErrors')||'[]');
+          arr.push({...entry, t:Date.now()});
+          sessionStorage.setItem('lastErrors', JSON.stringify(arr.slice(-10)));
+        }catch{}
+      }
+      window.addEventListener('error', e=>{
+        const where = e.filename ? ` @ ${String(e.filename).split('/').pop()}:${e.lineno||'?'}` : '';
+        const msg = `[ERR] ${e.message||'unknown error'}${where}`;
+        persistErr({type:'error', msg:e.message, where});
+        pushBanner(msg);
+      });
+      window.addEventListener('unhandledrejection', e=>{
+        const r=e.reason;
+        const msg = `[PROMISE] ${(r&&(r.message||r.toString()))||'unknown rejection'}`;
+        persistErr({type:'rejection', msg:String(r&&(r.message||r))});
+        pushBanner(msg);
+      });
+      // Replay any errors persisted from the previous page load
+      try{
+        const prior=JSON.parse(sessionStorage.getItem('lastErrors')||'[]');
+        if(prior.length){
+          // Only replay if within last 60s — older errors are stale noise
+          const recent=prior.filter(x=>Date.now()-x.t<60000);
+          if(recent.length){
+            window.addEventListener('DOMContentLoaded',()=>{
+              recent.forEach(x=>pushBanner(`[prev] ${x.msg||''}${x.where||''}`));
+            });
+          }
+          sessionStorage.removeItem('lastErrors');
+        }
+      }catch{}
+    })();
+
+    /* ─── Recovery escape hatch (?reset=1) ────────────────────────
+     * Nukes the service worker + caches + sessionStorage, then
+     * redirects to the clean URL. Holdings data in localStorage is
+     * preserved. Visit ?reset=1 if the app is stuck.
+     */
+    if(location.search.indexOf('reset')>=0){
+      (async()=>{
+        try{
+          if('serviceWorker' in navigator){
+            const regs=await navigator.serviceWorker.getRegistrations();
+            await Promise.all(regs.map(r=>r.unregister()));
+          }
+          if('caches' in self){
+            const keys=await caches.keys();
+            await Promise.all(keys.map(k=>caches.delete(k)));
+          }
+          try{ sessionStorage.clear(); }catch{}
+        }catch(e){ console.warn('[Reset] partial', e); }
+        location.replace('./portfolio-tracker.html');
+      })();
+    } else if('serviceWorker' in navigator && location.protocol.startsWith('http')){
+      /* ─── Service worker registration with manual update banner ───
+       * The previous auto-reload-on-controllerchange mechanism caused
+       * an Android stuck-on-open loop. We now wait for the user to
+       * tap an "Update available" banner before activating a new SW.
+       * That eliminates the entire reload-race class of bugs.
+       */
       window.addEventListener('load', ()=>{
         navigator.serviceWorker.register('service-worker.js').then(reg=>{
           console.log('[PWA] Service worker registered, scope:', reg.scope);
-          // Force-check for a new SW version on every page load
-          reg.update();
-          // Only auto-reload if (a) there was already a SW controlling this page
-          // AND (b) we haven't already reloaded once this session — belt-and-braces
-          // against any future runaway loop.
-          if(hadController && !sessionStorage.getItem('sw-reloaded')){
-            let reloading=false;
-            navigator.serviceWorker.addEventListener('controllerchange', ()=>{
-              if(!reloading){
-                reloading=true;
-                sessionStorage.setItem('sw-reloaded','1');
-                window.location.reload();
+          // Show banner if a worker is already waiting (e.g. installed during a previous visit)
+          if(reg.waiting && navigator.serviceWorker.controller) showUpdateBanner(reg.waiting);
+          // Watch for updates that arrive during this session
+          reg.addEventListener('updatefound', ()=>{
+            const nw=reg.installing;
+            if(!nw) return;
+            nw.addEventListener('statechange', ()=>{
+              if(nw.state==='installed' && navigator.serviceWorker.controller){
+                showUpdateBanner(nw);
               }
             });
-          }
+          });
+          // Force-check for a new SW version on every page load
+          reg.update();
         }).catch(err=>console.warn('[PWA] SW registration failed:', err.message));
+        // After the new SW takes control (post user tap → SKIP_WAITING),
+        // reload exactly once to pick up the fresh shell.
+        let reloaded=false;
+        navigator.serviceWorker.addEventListener('controllerchange', ()=>{
+          if(reloaded) return;
+          reloaded=true;
+          location.reload();
+        });
       });
+      function showUpdateBanner(worker){
+        if(document.getElementById('__upd_banner')) return;
+        const make=()=>{
+          const b=document.createElement('div');
+          b.id='__upd_banner';
+          b.style.cssText='position:fixed;left:50%;bottom:16px;transform:translateX(-50%);z-index:2147483646;background:#1e293b;color:#fff;border:1px solid #3b82f6;border-radius:999px;padding:10px 18px;font:13px -apple-system,system-ui,sans-serif;cursor:pointer;box-shadow:0 4px 16px rgba(0,0,0,.4);user-select:none';
+          b.textContent='⟳ New version ready — tap to update';
+          b.onclick=()=>{ b.textContent='Updating…'; worker.postMessage({type:'SKIP_WAITING'}); };
+          document.body.appendChild(b);
+        };
+        if(document.body) make();
+        else document.addEventListener('DOMContentLoaded', make);
+      }
     }
   </script>
   <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
@@ -297,7 +408,7 @@ const { useState, useEffect, useRef, useCallback, useMemo } = React;
 /* ─── constants ─── */
 // VERSION marker — if you don't see this log in the console, the browser
 // is running cached old code. Build timestamp updated on each edit.
-const APP_VERSION='v7.10-news-feed-2026-05-24';
+const APP_VERSION='v7.12-recovery-2026-05-24';
 console.log('%c🚀 Portfolio Tracker '+APP_VERSION,'background:#3b82f6;color:white;padding:4px 10px;border-radius:4px;font-weight:bold;font-size:14px');
 console.log('%cOrigin: '+location.origin+(location.protocol==='file:'?' ⚠️ (use start-portfolio-tracker.bat to run via localhost)':' ✓'),'color:'+(location.protocol==='file:'?'#ef4444':'#22c55e')+';font-weight:bold');
 const STORE='ptv3', STORE_OLD='ptv2';
