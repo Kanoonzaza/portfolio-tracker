@@ -9,7 +9,7 @@
  *
  * On version bump, the old cache is purged in 'activate'.
  */
-const VERSION='ptv3-sw-2026-06-07';
+const VERSION='ptv3-sw-2026-06-08';
 const SHELL_CACHE='shell-'+VERSION;
 const SHELL_URLS=[
   './portfolio-tracker.html',

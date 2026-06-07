@@ -445,7 +445,7 @@ const { useState, useEffect, useRef, useCallback, useMemo } = React;
 /* ─── constants ─── */
 // VERSION marker — if you don't see this log in the console, the browser
 // is running cached old code. Build timestamp updated on each edit.
-const APP_VERSION='v7.15-2026-06-07';
+const APP_VERSION='v7.16-2026-06-08';
 console.log('%c🚀 Portfolio Tracker '+APP_VERSION,'background:#3b82f6;color:white;padding:4px 10px;border-radius:4px;font-weight:bold;font-size:14px');
 console.log('%cOrigin: '+location.origin+(location.protocol==='file:'?' ⚠️ (use start-portfolio-tracker.bat to run via localhost)':' ✓'),'color:'+(location.protocol==='file:'?'#ef4444':'#22c55e')+';font-weight:bold');
 const STORE='ptv3', STORE_OLD='ptv2';
@@ -1687,18 +1687,52 @@ function parseDime(text){
 
     let pendingCostBasis=null;
     if(isPlView){
-      // P/L view: pull the PnL straight from the row's signed parenthetical, e.g.
-      // "(-4.00 USD)" / "(+3.00 USD)". Anchoring on the parentheses survives a
-      // garbled or missing "USD" unit (OCR sometimes reads it "USO"), which the old
-      // unit==='USD' token search dropped silently. THB amounts use "≈ … THB" (no
-      // parens) and % values have no parens, so this won't collide with them.
-      const pl=body.match(/\(\s*([+\-])\s*(\d{1,4}(?:,\d{3})*\.\d{2})\s*U?S?D?\s*\)/);
-      if(pl){
-        const pnl=parseFloat(pl[2].replace(/,/g,''));
-        // Sanity: PnL magnitude can't exceed 10x holding (would imply negative cost basis)
-        if(pnl<=holding*10){
-          const cb=pl[1]==='-'?holding+pnl:holding-pnl;
-          if(cb>0) pendingCostBasis=parseFloat(cb.toFixed(2));
+      // Derive cost basis from the row's P/L, trying progressively looser signals.
+      // The profit text (small, coloured green/red) OCRs far LESS reliably than the
+      // black holding value — so shares fill but cost basis often didn't. We fall
+      // back through several encodings of the same number to recover it.
+      //   cost = holding − pnl   (pnl signed: + = gain → cost below holding)
+      let pnl=null; // signed USD P/L (positive = gain)
+
+      // Tier 1: the signed parenthetical "(-4.00 USD)" / "(+3.00 USD)".
+      const pm=body.match(/\(\s*([+\-])\s*(\d{1,4}(?:,\d{3})*\.\d{2})\s*U?S?D?\s*\)/);
+      if(pm) pnl=(pm[1]==='-'?-1:1)*parseFloat(pm[2].replace(/,/g,''));
+
+      // Tier 2: any signed USD-unit token (survives dropped parentheses, e.g. "+4.54 USD").
+      if(pnl===null){
+        const ut=toks.find(t=>t.unit==='USD' && (t.sign==='+'||t.sign==='-'));
+        if(ut) pnl=(ut.sign==='-'?-1:1)*ut.val;
+      }
+
+      if(pnl!==null && Math.abs(pnl)<=holding*10){
+        const cb=holding-pnl;
+        if(cb>0) pendingCostBasis=parseFloat(cb.toFixed(2));
+      }
+
+      // Tier 3: fall back to the big bold gain PERCENTAGE, which OCRs much more
+      // reliably than the tiny "(…USD)". cost = holding / (1 + gain%/100).
+      // The gain% is a percent token; the small allocation % is NEVER signed, so a
+      // signed % is unambiguously the gain. For an unsigned (green/positive) gain we
+      // only trust the first % token when a USD magnitude corroborates it — that
+      // guards against mistaking the allocation % for the gain.
+      if(pendingCostBasis===null){
+        const pctToks=toks.filter(t=>t.unit==='%');
+        const gp=pctToks.find(t=>t.sign==='+'||t.sign==='-') || pctToks[0];
+        if(gp){
+          let g=null; // signed fractional gain
+          if(gp.sign==='-') g=-gp.val/100;
+          else if(gp.sign==='+') g=gp.val/100;
+          else {
+            const usdMag=toks.find(t=>t.unit==='USD');
+            if(usdMag){
+              const candCost=holding/(1+gp.val/100);
+              if(candCost>0 && Math.abs((holding-candCost)-usdMag.val)<=Math.max(0.5,usdMag.val*0.2)) g=gp.val/100;
+            }
+          }
+          if(g!==null && g>-0.95){
+            const cb=holding/(1+g);
+            if(cb>0 && cb<holding*100) pendingCostBasis=parseFloat(cb.toFixed(2));
+          }
         }
       }
     }
