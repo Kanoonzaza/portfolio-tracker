@@ -445,7 +445,7 @@ const { useState, useEffect, useRef, useCallback, useMemo } = React;
 /* ─── constants ─── */
 // VERSION marker — if you don't see this log in the console, the browser
 // is running cached old code. Build timestamp updated on each edit.
-const APP_VERSION='v7.14-2026-05-24';
+const APP_VERSION='v7.15-2026-06-07';
 console.log('%c🚀 Portfolio Tracker '+APP_VERSION,'background:#3b82f6;color:white;padding:4px 10px;border-radius:4px;font-weight:bold;font-size:14px');
 console.log('%cOrigin: '+location.origin+(location.protocol==='file:'?' ⚠️ (use start-portfolio-tracker.bat to run via localhost)':' ✓'),'color:'+(location.protocol==='file:'?'#ef4444':'#22c55e')+';font-weight:bold');
 const STORE='ptv3', STORE_OLD='ptv2';
@@ -1606,12 +1606,17 @@ function fuzzyTickerVariants(sym){
 // after holding. Both extractions are independent — whichever data the
 // screenshot contains gets pulled.
 function parseDime(text){
-  // 1) Detect WHICH Dime! view via header text.
-  //    "Unrealized P/L" appears as a header on the P/L view screen.
-  //    If we see it, treat parens-USD as total PnL (no magnitude threshold).
-  //    Otherwise be conservative — assume Current Price view and skip PnL extraction.
-  const isPlView=/Unrealized\s*P\s*\/?\s*L/i.test(text);
-  console.log('[Import/Dime] View:', isPlView?'P/L':'Current Price (or unknown)');
+  // 1) Detect WHICH Dime! view we're on, from several resilient signals (a single
+  //    literal "Unrealized P/L" regex was too fragile — one OCR slip on the header
+  //    dropped cost basis for EVERY row). Any of:
+  //      • the "% Profit & Amount" column header (P/L view shows profit in that column)
+  //      • a fuzzy "Unrealiz/Unrealis" header match
+  //      • per-row evidence: ≥2 signed parenthetical USD tokens, e.g. "(-4.00 USD)"
+  //    When true, treat the parenthetical signed-USD per row as total PnL.
+  const profitHeader=/Profit\s*&?\s*Amount|Unrealiz|Unrealis/i.test(text);
+  const parenPnl=(text.match(/\(\s*[+\-]\s*\d{1,4}(?:,\d{3})*\.\d{2}\s*U?S?D?\s*\)/g)||[]).length;
+  const isPlView=profitHeader||parenPnl>=2;
+  console.log('[Import/Dime] View:', isPlView?'P/L':'Current Price (or unknown)', `(profitHeader=${profitHeader}, parenPnl=${parenPnl})`);
 
   // 2) Find ticker candidates: capital-starting word 2-7 chars, must be
   //    followed by a USD-amount-looking number within 30 chars.
@@ -1630,6 +1635,19 @@ function parseDime(text){
     if(!/^[\s\W]{0,5}\d{1,4}\.\d{2}(?!\s*%)/.test(after)) continue;
     candidates.push({sym:upper, raw, pos:m.index, end:m.index+raw.length});
   }
+  // 2b) Supplementary pass: recover tickers glued to logo text (e.g. OCR reads the
+  //     "cogent" word-logo + ticker as "cogentCCOI 46.26"). The \b-anchored regex
+  //     above misses these — there's no word boundary before the ticker. Match an
+  //     uppercase run immediately followed by a USD-amount, no leading boundary
+  //     required. Conservative: must be followed by a $NN.NN value (not a %).
+  const glueRe=/([A-Z]{2,6})(?=\s{0,3}\d{1,4}\.\d{2}(?!\s*%))/g;
+  while((m=glueRe.exec(text))!==null){
+    const upper=m[1];
+    if(TICKER_SKIP.has(upper)) continue;
+    if(candidates.some(c=>c.pos===m.index||c.end===m.index+upper.length||c.sym===upper)) continue;
+    candidates.push({sym:upper, raw:upper, pos:m.index, end:m.index+upper.length});
+  }
+  candidates.sort((a,b)=>a.pos-b.pos); // keep blocks in document order
   console.log('[Import/Dime] Candidates:',candidates.map(c=>c.raw));
 
   // 3) Build per-ticker text blocks (dedupe symbols by first occurrence).
@@ -1669,16 +1687,19 @@ function parseDime(text){
 
     let pendingCostBasis=null;
     if(isPlView){
-      // P/L view: signed-USD token IS the PnL, no magnitude threshold.
-      // (The previous 10% threshold incorrectly rejected real PnL for small-gain
-      // positions like ALMU at +7%, where $3.08 PnL was < 10% of $43.24 holding.)
-      let pnlTok=toks.find(t=>t.unit==='USD' && (t.sign==='+'||t.sign==='-'));
-      // Sanity: PnL magnitude can't exceed 10x holding (would imply negative cost basis)
-      if(pnlTok && pnlTok.val > holding*10) pnlTok=null;
-      if(pnlTok){
-        const sign=pnlTok.sign||'+';
-        const cb=sign==='-'?holding+pnlTok.val:holding-pnlTok.val;
-        if(cb>0) pendingCostBasis=parseFloat(cb.toFixed(2));
+      // P/L view: pull the PnL straight from the row's signed parenthetical, e.g.
+      // "(-4.00 USD)" / "(+3.00 USD)". Anchoring on the parentheses survives a
+      // garbled or missing "USD" unit (OCR sometimes reads it "USO"), which the old
+      // unit==='USD' token search dropped silently. THB amounts use "≈ … THB" (no
+      // parens) and % values have no parens, so this won't collide with them.
+      const pl=body.match(/\(\s*([+\-])\s*(\d{1,4}(?:,\d{3})*\.\d{2})\s*U?S?D?\s*\)/);
+      if(pl){
+        const pnl=parseFloat(pl[2].replace(/,/g,''));
+        // Sanity: PnL magnitude can't exceed 10x holding (would imply negative cost basis)
+        if(pnl<=holding*10){
+          const cb=pl[1]==='-'?holding+pnl:holding-pnl;
+          if(cb>0) pendingCostBasis=parseFloat(cb.toFixed(2));
+        }
       }
     }
     // For Current Price view we don't try to extract anything beyond holding.
@@ -2262,6 +2283,14 @@ function ImportModal({onClose, onImport, existingHoldings=[]}){
   const validCount=rows.filter(r=>r.sym && r.shares && r.cost && r._validated!==false).length;
   const detectedCount=rows.filter(r=>r.sym).length;
   const unverifiedCount=rows.filter(r=>r._validated===false).length;
+  // Diagnostic for large portfolios spanning many screenshots: cross-check this batch
+  // against the holdings the user ALREADY has saved. Anything saved-but-not-detected-here
+  // is either an OCR miss (scroll-seam clipping — varies run to run) or a deterministic
+  // filter problem (e.g. TICKER_SKIP rejecting a real short ticker — same symbols every
+  // time). Surfacing the list lets the user tell which case they're in at a glance, and
+  // gives them a concrete to-do list of what to re-scan or add manually.
+  const detectedSymUpper=new Set(rows.filter(r=>r.sym).map(r=>r.sym.toUpperCase()));
+  const missingExisting=existingHoldings.filter(h=>h.symbol && !detectedSymUpper.has(h.symbol.toUpperCase()));
 
   return(
     <Modal title="📷 Import from Photos"onClose={onClose}maxWidth={680}>
@@ -2348,6 +2377,22 @@ function ImportModal({onClose, onImport, existingHoldings=[]}){
             </div>
           ):(
             <div className="alert alert-info">No holdings detected. Add manually below.</div>
+          )}
+
+          {/* Cross-check vs. saved portfolio: tells the user exactly which of their
+              EXISTING holdings this batch failed to pick up — the fastest way to tell
+              "same tickers missing every time" (→ a filter bug, e.g. TICKER_SKIP
+              rejecting a real short symbol) from "different ones each run" (→ OCR
+              missing rows clipped at screenshot scroll-seams). Compare this list
+              across re-imports to see which case you're in. */}
+          {existingHoldings.length>0 && missingExisting.length>0 && (
+            <div style={{background:'rgba(245,158,11,.08)',border:'1px solid rgba(245,158,11,.25)',borderRadius:8,padding:'8px 12px',fontSize:12,color:'var(--amber)',marginBottom:8}}>
+              📋 <strong>{missingExisting.length} of your saved holding{missingExisting.length!==1?'s':''} {missingExisting.length!==1?"weren't":"wasn't"} detected</strong> in this batch:{' '}
+              {missingExisting.map(h=>h.symbol).join(', ')}.
+              <div style={{marginTop:4,color:'var(--muted)'}}>
+                Run the import again on a fresh set of screenshots — if the <em>same</em> symbols show up here every time, it's a parser filter rejecting them (tell me which ones and I can fix it). If a <em>different</em> set shows up each time, it's OCR missing rows clipped at the seam between screenshots — rescroll with 2-3 rows of overlap between each capture so every holding appears whole at least once.
+              </div>
+            </div>
           )}
 
           {unverifiedCount>0&&(
@@ -4856,6 +4901,7 @@ function NotificationsSettings(){
 function SettingsPage({data,onRenamePortfolio,onDeletePortfolio,onAddPortfolio,onClearAll,onSetCurrency,user,syncing}){
   const fRef=useRef();
   const[editingPort,setEditingPort]=useState(null);
+  const[verCopied,setVerCopied]=useState(false);
   function exportJSON(){
     const blob=new Blob([JSON.stringify(data,null,2)],{type:'application/json'});
     const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download=`portfolio_${today()}.json`;a.click();URL.revokeObjectURL(url);
@@ -5014,6 +5060,16 @@ function SettingsPage({data,onRenamePortfolio,onDeletePortfolio,onAddPortfolio,o
       </div>
       <div className="card">
         <div style={{padding:'14px 20px',fontWeight:600,fontSize:14,borderBottom:'1px solid var(--border)'}}>About</div>
+        <div className="set-row">
+          <div>
+            <div className="set-title">App version</div>
+            <div className="set-sub">Tap to copy · check this matches after an update</div>
+          </div>
+          <button className="btn btn-ghost btn-sm" title="Copy version"
+            onClick={()=>{ try{ navigator.clipboard?.writeText(APP_VERSION); }catch{} setVerCopied(true); setTimeout(()=>setVerCopied(false),1500); }}>
+            {verCopied?'✓ Copied':APP_VERSION}
+          </button>
+        </div>
         <div style={{padding:'14px 20px',fontSize:13,color:'var(--muted)',lineHeight:1.7}}>
           Data is stored locally in your browser. Prices from Yahoo Finance via CORS proxy, refreshed every 30 seconds automatically.<br/>
           <strong style={{color:'var(--text)'}}>Tip:</strong> Click any holding row to expand its trade &amp; dividend history.
