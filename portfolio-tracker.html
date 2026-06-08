@@ -445,7 +445,7 @@ const { useState, useEffect, useRef, useCallback, useMemo } = React;
 /* ─── constants ─── */
 // VERSION marker — if you don't see this log in the console, the browser
 // is running cached old code. Build timestamp updated on each edit.
-const APP_VERSION='v7.16-2026-06-08';
+const APP_VERSION='v7.17-2026-06-08';
 console.log('%c🚀 Portfolio Tracker '+APP_VERSION,'background:#3b82f6;color:white;padding:4px 10px;border-radius:4px;font-weight:bold;font-size:14px');
 console.log('%cOrigin: '+location.origin+(location.protocol==='file:'?' ⚠️ (use start-portfolio-tracker.bat to run via localhost)':' ✓'),'color:'+(location.protocol==='file:'?'#ef4444':'#22c55e')+';font-weight:bold');
 const STORE='ptv3', STORE_OLD='ptv2';
@@ -525,7 +525,11 @@ async function getPricesViaStooq(symbols){
   const results=await Promise.all(chunks.map(async chunk=>{
     // Space separator (NOT comma — see header comment). After encodeURIComponent
     // it becomes %20 which Stooq splits on correctly.
-    const sStr=chunk.map(s=>s.toLowerCase()+'.us').join(' ');
+    // Stooq uses a dash for class shares (BRK-B.US), but our symbols use a dot
+    // (BRK.B). Convert for the query and keep a reverse map to re-key the response.
+    const rev={};
+    for(const s of chunk) rev[s.replace(/\./g,'-').toUpperCase()]=s;
+    const sStr=chunk.map(s=>s.replace(/\./g,'-').toLowerCase()+'.us').join(' ');
     const url=`https://stooq.com/q/l/?s=${encodeURIComponent(sStr)}&f=sd2t2ohlcv&h&e=csv`;
     try{
       const ctrl=new AbortController();
@@ -539,8 +543,9 @@ async function getPricesViaStooq(symbols){
       for(let j=1;j<lines.length;j++){
         const cells=lines[j].split(',');
         if(cells.length<7) continue;
-        const stooqSym=cells[0]; // e.g. AAPL.US
-        const ourSym=stooqSym.replace(/\.US$/i,'').toUpperCase();
+        const stooqSym=cells[0]; // e.g. AAPL.US or BRK-B.US
+        const bareSym=stooqSym.replace(/\.US$/i,'').toUpperCase();
+        const ourSym=rev[bareSym]||bareSym; // map BRK-B back to BRK.B
         if(cells.includes('N/D')) continue; // unknown ticker — skip
         const asOf=cells[1] && /^\d{4}-\d{2}-\d{2}$/.test(cells[1]) ? cells[1] : today();
         const open=parseFloat(cells[3]);
@@ -773,7 +778,9 @@ async function getPricesViaChart(symbols){
     const slice=symbols.slice(i,i+BATCH);
     const results=await Promise.all(slice.map(async sym=>{
       try{
-        const url=`https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(sym)}?interval=1d&range=2d`;
+        // Yahoo uses a dash for class shares (BRK-B); our symbols use a dot (BRK.B).
+        const apiSym=sym.replace(/\./g,'-');
+        const url=`https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(apiSym)}?interval=1d&range=2d`;
         const r=await fetchWithFallback(url, {}, 8000);
         const j=await r.json();
         const meta=j?.chart?.result?.[0]?.meta;
@@ -1620,7 +1627,9 @@ function parseDime(text){
 
   // 2) Find ticker candidates: capital-starting word 2-7 chars, must be
   //    followed by a USD-amount-looking number within 30 chars.
-  const tickRe=/\b([A-Z][A-Za-z]{1,6})\b/g;
+  // Allow an optional ".X" class-share suffix so dotted tickers like BRK.B / BF.B
+  // are captured (the price fetchers convert the "." to "-" for the API).
+  const tickRe=/\b([A-Z][A-Za-z]{1,6}(?:\.[A-Z])?)\b/g;
   const candidates=[];
   let m;
   while((m=tickRe.exec(text))!==null){
@@ -1678,7 +1687,10 @@ function parseDime(text){
       const m=body.slice(t.idx,t.idx+20).match(/^[+\-]?\s*(\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+\.\d+|\d+)/);
       return m && m[1].includes('.');
     };
-    const holdingTok=toks.find(t=>!t.unit&&!t.sign&&t.val>=1&&tokenHasOwnDecimal(t));
+    // Holding floor 0.01 (was 1.00): catch real sub-$1 positions (e.g. a beaten-down
+    // holding worth $0.04). The "0.00" junk rows are already excluded (tokenizer drops
+    // val<=0), so this won't readmit them.
+    const holdingTok=toks.find(t=>!t.unit&&!t.sign&&t.val>=0.01&&tokenHasOwnDecimal(t));
     if(!holdingTok) continue;
     const holding=holdingTok.val;
 
